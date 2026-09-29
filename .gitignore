@@ -1,0 +1,74 @@
+# --- 秘密與環境設定（只提交 .example 範本）---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.mobileprovision
+*.keystore
+*.jks
+secrets/
+service-account*.json
+
+# --- Node / TypeScript（services/api、contracts 工具）---
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# --- Dart / Flutter ---
+.dart_tool/
+.packages
+.pub-cache/
+.pub/
+.flutter-plugins
+.flutter-plugins-dependencies
+**/doc/api/
+
+# --- Android ---
+*.iml
+.gradle/
+local.properties
+**/android/.gradle/
+**/android/captures/
+**/android/app/debug/
+**/android/app/profile/
+**/android/app/release/
+
+# --- iOS / macOS ---
+**/ios/Pods/
+**/ios/.symlinks/
+**/ios/Flutter/Flutter.framework
+**/ios/Flutter/Flutter.podspec
+**/ios/Flutter/ephemeral/
+**/ios/Runner/GeneratedPluginRegistrant.*
+**/macos/Pods/
+xcuserdata/
+*.xcworkspace/xcuserdata/
+.DS_Store
+
+# --- 編輯器 ---
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+
+# --- 執行產物、診斷與實驗輸出（不進版本庫）---
+*.log
+logs/
+tmp/
+.cache/
+scratch/
+diagnostics/
+*.sqlite
+*.sqlite-journal
+*.db
+
+# --- 真實軌跡／個資（僅公開合成資料可進 testdata/）---
+testdata/private/
+testdata/**/*.real.*
