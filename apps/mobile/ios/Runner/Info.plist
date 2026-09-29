@@ -5,6 +5,12 @@
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>CFBundleDevelopmentRegion</key>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>RoadScope 需要定位來記錄行程與診斷採樣品質。</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>RoadScope 需要在畫面關閉時持續記錄使用者主動開始的行程。</string>
+	<key>UIBackgroundModes</key>
+	<array><string>location</string></array>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
 	<string>RoadScope</string>
