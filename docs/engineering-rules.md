@@ -22,7 +22,7 @@
 
 1. **計時在裝置本機完成**。禁止以伺服器收包時間、網路時間或 UI timer 作為穿線／圈速依據。
 2. **第一版不依賴登入或網路**。帳號或後端失效不得阻止本機記錄與計時。
-3. **正式計時演算法單一維護者為 Codex**。Claude Code 的參考核算工具只核對明確案例，不得演化成第二套產品引擎。
+3. **正式計時演算法單一維護者為 Claude Code**，以純 Dart 在裝置本機執行。Codex 負責 UI、原生整合與客戶端，不維護第二套計時演算法；參考核算工具只核對明確案例。
 4. **不先建置**：軌跡雲端同步、聊天、排行榜、微服務拆分、Redis／多實例。
 5. **採樣／儲存／傳輸三種頻率分開設定**。重送舊樣本不得冒充新定位。
 6. **記錄狀態與分享狀態獨立**。加入車隊不等於同意上傳；App 重啟預設不自動恢復分享。
@@ -35,10 +35,10 @@
 
 | 路徑 | 擁有者 |
 |---|---|
-| `apps/mobile/` | Codex |
-| `packages/timing_core/` | Codex |
-| `packages/device_bridge/` | Codex |
-| `packages/mobile_data/` | Codex |
+| `apps/mobile/` | Codex：UI、App 組裝與平台入口；不在此重複實作計時／資料核心 |
+| `packages/timing_core/` | Claude Code：純 Dart 計時與決定性重播 |
+| `packages/device_bridge/` | Codex：Android／iOS 原生採集、單一寫入者與平台通道 |
+| `packages/mobile_data/` | Claude Code：原生紀錄匯入、行程資料、恢復與匯出；P0 既有實作由 Codex 完成真機驗證後交接 |
 | `.github/workflows/mobile.yml` | Codex |
 | `AGENTS.md` | Codex |
 | `services/api/` | Claude Code |
@@ -51,6 +51,8 @@
 | `testdata/` | 雙方可新增，既有檔案不互改 |
 | `docs/` | 雙方可新增；本文件變更需雙方確認 |
 | 根目錄 `01`–`05` 規劃文件、`USER_AGENT_PREFERENCES.md` | 使用者 |
+
+P0 過渡：PR #2 的原生採集、NDJSON、診斷畫面與既有 `mobile_data` 程式由 Codex 維護到真機採集驗證與交接完成；之後 Claude Code 接手 `mobile_data` 的新變更。跨層問題由兩方共同重現，依路徑擁有權分別修正。`LocationSample`、記錄狀態及原生紀錄格式的變更先在共同契約確認相容性，不得各自改出兩種格式。正式計時引擎只有 `timing_core` 一份，且不依賴伺服器或 UI timer。
 
 ## 4. 分支與工作目錄
 
