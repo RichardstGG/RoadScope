@@ -1,0 +1,39 @@
+name: contracts
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/contracts.yml
+      - contracts/**
+      - testdata/contracts/**
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/contracts.yml
+      - contracts/**
+      - testdata/contracts/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fixtures:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: contracts/tools/package-lock.json
+      - run: npm ci
+        working-directory: contracts/tools
+      # Every fixture must land on the side it belongs to.
+      - run: npm test
+        working-directory: contracts/tools
+      # The CLI is what Codex and the handoff report will actually run, so keep
+      # it exercised separately from the library-level fixture runner.
+      - name: validate valid fixtures
+        run: node validate-location-log.mjs ../../testdata/contracts/location-log/v1/valid/*.ndjson
+        working-directory: contracts/tools

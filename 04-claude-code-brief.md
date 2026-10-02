@@ -1,20 +1,24 @@
 # 給 Claude Code 的工作說明
 
-請先讀取同資料夾的 01-master-plan.md 與 02-contract-draft.md。你負責伺服器、資料庫、通訊契約與部署；手機 App、計時核心與 Swift／Kotlin 整合由 Codex 負責。
+請先讀取同資料夾的 01-master-plan.md 與 02-contract-draft.md。你負責純 Dart 記錄資料與正式計時核心、伺服器、資料庫、通訊契約與部署；Flutter UI、App 組裝與 Swift／Kotlin 原生整合由 Codex 負責。
 
 ## 工作原則
 
 這是先做本機計時、之後日常紀錄與車隊的 App。不要要求第一版依賴帳號或雲端才能記錄；不要用伺服器收包時間算圈速；不要先建立軌跡雲端同步、聊天、排行榜或微服務。
 
-等待 Codex 的 bootstrap PR 合併後，從同一基準建立自己的分支與工作目錄。雙方遵守同一份 docs/engineering-rules.md，CLAUDE.md 指向共同規則；不與 Codex 同時修改同一 checkout。
+以目前 repository／PR 為準，從已合併的共同基準建立自己的分支與工作目錄。雙方遵守同一份 docs/engineering-rules.md，CLAUDE.md 指向共同規則；不與 Codex 同時修改同一 checkout。
 
 ## 第一張任務：契約與 P0 驗證支援
 
 1. 與 Codex 確定 LocationSample、時間基準、速度／距離單位及品質旗標。
 2. 將車隊 HTTP 草案整理為 OpenAPI、WebSocket 整理為 JSON Schema；這是草案定案工作，不需要一開始完成整個後端。
-3. 提供樣本格式驗證器、合法／非法案例，以及可驗證數學預期結果的合成穿線資料。正式手機計時演算法由 Codex 單一維護；參考核算工具不演變成第二套產品引擎。
+3. 提供樣本格式驗證器、合法／非法案例，以及可驗證數學預期結果的合成穿線資料。P0 既有 `mobile_data` 由 Codex 完成真機驗證後交接；交接後你是 `mobile_data` 與 `timing_core` 的維護者，正式計時演算法僅維護一份，且在裝置本機執行。
 4. 提供最小測試端點協助量測背景網路傳送；測試位置資料不要寫入長期日誌。
 5. 建立契約檢查及後端 CI 骨架，定義本機環境設定，不放真實憑證。
+
+## 手機資料與計時（P0 交接後）
+
+維護 `packages/mobile_data/` 的原生 NDJSON 匯入、序號冪等、行程保存／恢復與 GPX，以及 `packages/timing_core/` 的路段／賽道狀態機、穿線內插、品質檢查與決定性重播。原生採集、檔案追加寫入者與平台生命週期仍由 Codex 負責。先與 Codex 確認 `LocationSample`、記錄狀態、時間基準和原生紀錄格式的相容性；不要直接改動 `apps/mobile/` 或 `device_bridge/` 來滿足資料層測試。
 
 ## 車隊實作
 
@@ -32,6 +36,6 @@ API 與 WSS 同時驗證身分及當下權限，不信任 payload 的 userId。s
 
 ## 交付規則
 
-主要可修改 services/api、infra、supabase/migrations、backend／contracts CI 與伺服器測試。contracts 由你主筆，但需讓 Codex 使用同樣案例完成客戶端驗證；變更含相容性及遷移說明。
+主要可修改 packages/timing_core、P0 交接後的 packages/mobile_data、services/api、infra、supabase/migrations、backend／contracts CI 與對應測試。contracts 由你主筆，但需讓 Codex 使用同樣案例完成客戶端驗證；變更含相容性及遷移說明。
 
 每次交付包含：端點／訊息變更、範例、已執行測試、尚未驗證項目、部署與回復步驟、手機端配合事項。以小型可驗收 PR 推進，不等待全部後端完成才讓手機端整合。
