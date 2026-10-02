@@ -27,11 +27,10 @@
       "pattern": "^[a-z][a-z0-9_]*$"
     },
     "sourceType": {
-      "description": "Source kind, not implementation and not provenance. phone_gnss is a deprecated alias of phone_location accepted until the end of P1.",
+      "description": "Source kind of a positioning fix, not implementation and not provenance. Excludes OBD: this record requires WGS84 coordinates and OBD produces none (see VehicleSample). phone_gnss is a deprecated alias of phone_location accepted until the end of P1.",
       "enum": [
         "phone_location",
         "external_gnss",
-        "obd",
         "phone_gnss"
       ]
     },

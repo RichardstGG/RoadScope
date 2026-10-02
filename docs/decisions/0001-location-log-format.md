@@ -74,12 +74,19 @@ JSON Schema 是唯一真實來源。暫不導入 schema→Dart／TypeScript 的�
 
 此決定明知與 `01-master-plan.md` §6「生成檔由生成器產生，不人工改兩份模型來湊相容」的字面規定有張力。取捨理由：P0 階段欄位仍在變動，過早鎖定生成工具的轉換成本高於現在維護兩份手寫模型，而 fixtures 提供了可自動檢查的等價保證。此例外僅限 `location-log` 契約，車隊 HTTP／WSS 契約另行評估。
 
-### D9 舊格式不支援，`schemaVersion` 維持 1
-`recordType` 自契約生效起為必填。缺少該欄位的紀錄（PR #2 的 pre-contract 輸出）為非法資料，不提供寬鬆路徑。
+### D9 正式匯入器不支援舊格式，`schemaVersion` 維持 1
+`recordType` 自契約生效起為必填。缺少該欄位的紀錄（PR #2 的 pre-contract 輸出）在正式匯入器中為非法資料，不提供寬鬆路徑。
 
-理由：成立前提是尚未進行任何實機採集，現有資料只有安裝 APK 後的數分鐘前景樣本，丟棄無損失。選擇不 bump 到 `schemaVersion: 2` 是因為那條 legacy 分支必須由匯入器、驗證器與 `timing_core` 永久維護，而它服務的資料量為零。
+**事實更正（2026-10-02）：** 本決定最初寫「尚未進行任何實機採集、資料量為零、丟棄無損失」。這不正確——使用者已提供舊版 Android 真機匯出。更正後的立場是：
 
-另一個理由比相容性更重要：若採「缺 `recordType` 就當 sample」的啟發式，真正損壞的行也會被放行，錯誤碼 `MISSING_RECORD_TYPE` 與 `NOT_JSON` 的診斷價值會一起消失。
+- 舊版真機匯出**確實存在**，保留供**私人分析**使用。這類檔案含真實座標，不得加入版本庫（見 `docs/engineering-rules.md` §8）。
+- 正式匯入器與驗證器**仍嚴格拒絕**缺少 `recordType` 的紀錄。保留舊資料的價值不構成在產品程式碼中長期維護舊格式路徑的理由。
+- 需要讀舊檔時，用一次性的記憶體內轉換補上 `recordType: "sample"`，再交給本契約的驗證器。Codex 已如此驗證過：**樣本全數通過**，僅出現兩類警告——缺少 `recording_started`（`MISSING_RECORDING_STARTED`）與 `phone_gnss` 舊別名（`SOURCE_TYPE_DEPRECATED`）。這證實欄位層面的落差只有 `recordType` 與事件記錄，不是整體格式不相容。
+- 該轉換是分析用的臨時步驟，**不是契約的一部分**，不進 `packages/mobile_data`，也不出現在 `contracts/tools`。
+
+選擇不 bump 到 `schemaVersion: 2` 的理由隨之改變，但結論不變：legacy 分支必須由匯入器、驗證器與 `timing_core` 永久維護，而它服務的是一批不會再增加、且已有可行的一次性轉換路徑的歷史檔案。
+
+更重要的理由與資料量無關：若採「缺 `recordType` 就當 sample」的啟發式，真正損壞的行也會被放行，錯誤碼 `MISSING_RECORD_TYPE` 與 `NOT_JSON` 的診斷價值會一起消失。
 
 `recordType` 的**值**未知（較新寫入端）仍須容忍並保留；缺少欄位與值未知是兩條不同的路徑，不得合併。
 
@@ -87,6 +94,15 @@ JSON Schema 是唯一真實來源。暫不導入 schema→Dart／TypeScript 的�
 事件共同欄位加入 `occurredMonotonicUs`（必填），與樣本同一時間域、同一 `deviceBootId`。
 
 理由由 Codex 在 contracts 定案前提出的第 3 點引出：原設計只有 `occurredAtUtc`。但 `clock_adjusted` 事件裡 UTC 正是受質疑的那個值，只有 UTC 會讓校時事件本身無法在時間軸上定位，跨 boot 重播也失去對齊依據。
+
+### D11 `obd` 不屬於位置紀錄的來源種類
+`location-log` 的 `sourceType` 允許值縮小為 `phone_location` 與 `external_gnss`（外加過渡別名 `phone_gnss`）。移除 `obd`。
+
+理由由 Codex 在 PR #4 review 提出：`latDeg`／`lonDeg` 在本契約是必填，而 OBD 不產生 WGS84 座標。保留 `obd` 會讓契約允許一種永遠無法合法建構的記錄，等於邀請寫入端塞入假座標。
+
+`02-contract-draft.md` 已把車輛資料定義為獨立的 `VehicleSample`（`parameter`／`value`／`unit`／`validity`，無座標）。OBD 資料屬於該型別與日後的車輛遙測契約，不屬於位置紀錄。`01-master-plan.md` §11 的 `ObdSource` 是**來源介面**的邊界，不等於位置樣本的來源種類——兩者原本被我混為一談。
+
+外接 GNSS 保留在允許值內：它確實產生 WGS84 座標，是本契約的合理來源，只是尚未實作。
 
 
 ## 後果

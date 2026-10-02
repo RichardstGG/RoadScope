@@ -51,7 +51,8 @@
 
 語義補充：
 
-- `sourceType` 表**來源種類**，不表實作，也不表是否為模擬資料。允許值 `phone_location`、`external_gnss`、`obd`，對應 `01-master-plan.md` §11 的來源介面。實作差異由 `sourceId` 表示（`android-gps`、`ios-corelocation`）。
+- `sourceType` 表**定位來源種類**，不表實作，也不表是否為模擬資料。允許值 `phone_location` 與 `external_gnss`。實作差異由 `sourceId` 表示（`android-gps`、`ios-corelocation`）。
+- **`obd` 不是本契約的來源種類。** `latDeg`／`lonDeg` 在此為必填，而 OBD 不產生 WGS84 座標；車輛資料屬於 `02-contract-draft.md` 的 `VehicleSample` 與日後的車輛遙測契約。`01-master-plan.md` §11 的 `ObdSource` 是**來源介面**的邊界，不是位置樣本的來源種類。
 - `phone_gnss` 是 `phone_location` 的**過渡期別名**。驗證器接受並發出 `SOURCE_TYPE_DEPRECATED` 警告，匯入時映射為 `phone_location`。P1 結束時移除。
 - 合成資料的 `sourceType` 必須是**被模擬的來源種類**（通常 `phone_location`），模擬性質只由 `qualityFlags` 的 `synthetic` 表示。把 `sourceType` 設為 `synthetic` 會使合成資料無法重播成與真實來源相同的程式路徑，是明確禁止的。
 - 無效或不可得的量測值保存 `null`，不得用 `0` 冒充。
@@ -156,6 +157,8 @@ warning 刻意不致命：把未知記錄型別或未知旗標判為失敗，會
 ## 12. 型別策略
 
 JSON Schema 是唯一真實來源。**暫不導入 schema → Dart／TypeScript 的生成器**，兩端以 fixtures 對齊。理由與重新評估時機見 `docs/decisions/0001-location-log-format.md` D8。
+
+這是 `docs/engineering-rules.md` §5 第 2 條的明文例外，**僅限本機 `location-log` v1**，不延伸至車隊 HTTP／WebSocket 契約。
 
 ## 13. 已知限制
 
