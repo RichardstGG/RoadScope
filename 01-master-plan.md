@@ -15,18 +15,18 @@
 | 項目 | 主要負責者 | 交付與邊界 |
 |---|---|---|
 | 產品範圍、優先順序、版本發布 | 使用者 | 維護待辦與驗收結果；擁有程式庫、商店及雲端帳號 |
-| Flutter 畫面、互動、狀態管理 | Codex | 計時儀表、路線設定、結果、歷史、車隊與設定頁 |
-| 手機上的計時核心與資料 | Codex | 穿線、分段、圈數、品質檢查、SQLite、GPX、重播測試 |
-| Android／iOS 裝置整合 | Codex | Kotlin／Swift、背景採集、權限、分享傳輸、未來 BLE |
+| Flutter 畫面、互動、狀態管理 | Codex | 計時儀表、路線設定、結果、歷史、車隊與設定頁；透過單一資料／計時介面顯示狀態 |
+| 手機上的計時核心與資料 | Claude Code | 純 Dart 穿線、分段、圈數、品質檢查、資料匯入／恢復、SQLite、GPX、重播測試；在裝置本機執行 |
+| Android／iOS 裝置整合 | Codex | Kotlin／Swift、背景採集與原生追加紀錄、權限、分享傳輸、未來 BLE；P0 真機驗證由 Codex 持續負責 |
 | App 登入、API 與 WebSocket 客戶端 | Codex | 使用共同契約，處理網路與登入狀態 |
 | 伺服器 API、車隊規則與權限 | Claude Code | 登入 token 驗證、成員／邀請／分享工作階段 |
 | 車隊即時轉送、資料庫及部署 | Claude Code | WebSocket、遷移、限流、監控、備份／恢復與壓力測試 |
 | 共同通訊契約 | Claude Code 主筆，Codex 驗證 | 以 App 需求起草，修改時提供雙端相容方案 |
-| 計時參考案例與獨立核算 | Codex 定義預期結果，Claude Code 協助工具 | 保持一套正式計時演算法；參考工具只核對明確案例 |
+| 計時案例與獨立核算 | Claude Code 定義正式引擎的預期結果，Codex 協助跨平台整合驗證 | 保持一套正式計時演算法；獨立案例核算不演化成第二套產品引擎 |
 | iOS 建置及實機操作 | 朋友 | 依檢查表執行、回傳日誌與重現條件；不預設朋友負責寫 Swift |
 | 整合與合併 | 使用者主持，AI 協助 | 以可重現測試、實機證據與 PR 判斷，而非只看 AI 自述 |
 
-「前端」在此是整個手機 App。GPS、計時、背景採集雖然不是畫面，仍屬手機端，必須在裝置本機完成。Claude Code 不應把計時改成依賴伺服器到達時間。
+「前端」在此是整個手機 App。GPS、計時、背景採集雖然不是畫面，仍屬手機端，必須在裝置本機完成。Claude Code 維護的純 Dart 計時核心不得依賴伺服器到達時間。原生採集與追加紀錄由 Codex 負責；Claude Code 的資料層以序號冪等匯入，雙方依共同契約銜接。
 
 ## 3. 技術架構
 
@@ -100,10 +100,10 @@ Fastify 作為單一 HTTP／WebSocket 服務的基礎；不需要在初期拆微
 建議專案結構：
 
 ```text
-apps/mobile/                  # Codex：Flutter 與平台入口
-packages/timing_core/          # Codex：純 Dart 計時與重播
+apps/mobile/                  # Codex：Flutter UI、App 組裝與平台入口
+packages/timing_core/          # Claude Code：純 Dart 計時與重播
 packages/device_bridge/        # Codex：Swift／Kotlin 原生模組
-packages/mobile_data/          # Codex：資料與匯出
+packages/mobile_data/          # Claude Code：資料與匯出；P0 真機驗證後由 Codex 交接
 services/api/                 # Claude Code：HTTP 與 WebSocket
 infra/                        # Claude Code：部署與環境範例
 supabase/migrations/           # Claude Code：資料庫遷移
@@ -117,7 +117,7 @@ AGENTS.md                     # Codex 入口，指向共同規則
 CLAUDE.md                     # Claude Code 入口，指向共同規則
 ```
 
-第一個 bootstrap PR 由 Codex 建立骨架與共同規則入口，合併後 Claude Code 從該版本建立分支。跨目錄變更先寫明介面影響；共同規格由單一 PR 修改，避免雙方各改一份。生成檔由生成器產生，不人工改兩份模型來湊相容。
+第一個 bootstrap PR 由 Codex 建立骨架與共同規則入口，合併後 Claude Code 從該版本建立分支。跨目錄變更先寫明介面影響；共同規格由單一 PR 修改，避免雙方各改一份。P0 既有 `mobile_data` 實作由 Codex 完成真機採集驗證後交接 Claude Code；交接前不並行修改同一檔案。生成檔由生成器產生，不人工改兩份模型來湊相容。
 
 AGENTS.md 與 CLAUDE.md 保持短小，要求兩邊讀取同一份 docs/engineering-rules.md 與相關 contracts。不要把全部產品需求重複維護在兩個入口。這兩種專案指引均有官方支援。[Codex 指引](https://learn.chatgpt.com/docs/agent-configuration/agents-md)、[Claude Code 指引](https://code.claude.com/docs/en/memory)
 
@@ -140,15 +140,15 @@ Mac：安裝相容的 Xcode、Flutter、iOS 原生依賴工具、Git。使用者
 | 階段 | Codex 主工作 | Claude Code 主工作 | 驗收／投入初估 |
 |---|---|---|---|
 | P0 技術驗證 | 雙平台原生採集、鎖屏耐久保存、診斷頁 | 契約草案、資料檢查／重播輔助、簡單背景傳輸測試端點 | 真機兩小時測試與缺點率報告；30–50 小時 |
-| P1 計時 MVP | 穿線／分段／圈數、路線設定、歷史、GPX | 契約案例、獨立參考案例核算、測試流程 | 決定性重播、GPX 有效；80–140 小時 |
+| P1 計時 MVP | 路線設定、計時／歷史 UI、原生整合 | 純 Dart 穿線／分段／圈數、資料恢復／GPX、決定性重播與契約案例 | 決定性重播、GPX 有效；80–140 小時 |
 | P2 ≤20 人 Alpha | 真機問題、異常恢復、品質提示 | 診斷整理及測試自動化；車隊契約細化 | 無未解的重大資料遺失；40–70 小時 |
-| P3 日常紀錄 | 日常模式、移動／經過時間、摘要 | 帳號／車隊後端可開始實作 | 計時模式不退步；30–50 小時 |
+| P3 日常紀錄 | 日常模式 UI、原生採集整合 | 移動／經過時間與摘要資料邏輯；帳號／車隊後端可開始實作 | 計時模式不退步；30–50 小時 |
 | P4 車隊 | 登入、加入／上線、距離、1 Hz、背景傳輸 | API、JWT、成員、WSS、TTL、限流、staging | 16 人完整場景及權限隔離；60–100 小時 |
 | P5 ≤300 人 Beta | 耗電／弱網／多機型修正 | 80／300 人容量、監控、重啟與備份恢復 | 品質、延遲、成本報告；40–80 小時 |
 | P6 正式發布 | 廣告非行進頁面、商店資料、發版 | 正式環境、告警、回復與日後去廣告權益 | 審核及發布，另估 |
 | P7 擴充 | 外接 GNSS、OBD、完整 Log、秒差 | 必要協定版本／高頻服務驗證 | 按硬體及範圍另估 |
 
-保留前版估算：Alpha 累計約 150–260 小時，含車隊 Beta 累計約 280–490 小時。這是規劃工程投入，不是 AI 執行時長；不含商店等待、朋友可配合的間隔、硬體採購及大量重新學習。兩個 AI 不會讓工期直接減半，P0 到 P2 的關鍵路徑仍是手機採集與真機驗證。Claude 初期工量較少時投入驗證資產，不必先造大型後端。
+保留前版估算：Alpha 累計約 150–260 小時，含車隊 Beta 累計約 280–490 小時。這是規劃工程投入，不是 AI 執行時長；不含商店等待、朋友可配合的間隔、硬體採購及大量重新學習。兩個 AI 不會讓工期直接減半，P0 到 P2 的關鍵路徑仍是手機採集與真機驗證。Claude Code 另負責資料與計時核心，須與後端工作排程協調；不必先造大型後端。
 
 建議首個兩週工作安排（依可投入時數調整）：
 

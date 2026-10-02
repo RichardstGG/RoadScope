@@ -22,7 +22,7 @@
 
 1. **計時在裝置本機完成**。禁止以伺服器收包時間、網路時間或 UI timer 作為穿線／圈速依據。
 2. **第一版不依賴登入或網路**。帳號或後端失效不得阻止本機記錄與計時。
-3. **正式計時演算法單一維護者為 Codex**。Claude Code 的參考核算工具只核對明確案例，不得演化成第二套產品引擎。
+3. **正式計時演算法單一維護者為 Claude Code**，以純 Dart 在裝置本機執行。Codex 負責 UI、原生整合與客戶端，不維護第二套計時演算法；參考核算工具只核對明確案例。
 4. **不先建置**：軌跡雲端同步、聊天、排行榜、微服務拆分、Redis／多實例。
 5. **採樣／儲存／傳輸三種頻率分開設定**。重送舊樣本不得冒充新定位。
 6. **記錄狀態與分享狀態獨立**。加入車隊不等於同意上傳；App 重啟預設不自動恢復分享。
@@ -35,11 +35,12 @@
 
 | 路徑 | 擁有者 |
 |---|---|
-| `apps/mobile/` | Codex |
-| `packages/timing_core/` | Codex |
-| `packages/device_bridge/` | Codex |
-| `packages/mobile_data/` | Codex |
-| `.github/workflows/mobile.yml` | Codex |
+| `apps/mobile/` | Codex：UI、App 組裝與平台入口；不在此重複實作計時／資料核心 |
+| `packages/timing_core/` | Claude Code：純 Dart 計時與決定性重播 |
+| `packages/device_bridge/` | Codex：Android／iOS 原生採集、單一寫入者與平台通道 |
+| `packages/mobile_data/` | Claude Code：原生紀錄匯入、行程資料、恢復與匯出；P0 既有實作由 Codex 完成真機驗證後交接 |
+| `.github/workflows/mobile.yml` | Codex：只驗證 `apps/mobile/` 與 `packages/device_bridge/`；PR #2 需在交接前移除 `mobile_data` 測試步驟 |
+| `.github/workflows/dart-core.yml` | Claude Code：在 contracts v1 PR 建立，驗證 `packages/timing_core/` 與 `packages/mobile_data/` 的 `pub get`、`analyze`、`test` |
 | `AGENTS.md` | Codex |
 | `services/api/` | Claude Code |
 | `infra/` | Claude Code |
@@ -48,9 +49,23 @@
 | `.github/workflows/contracts.yml` | Claude Code |
 | `CLAUDE.md` | Claude Code |
 | `contracts/` | Claude Code 主筆，Codex 驗證（見 §5） |
-| `testdata/` | 雙方可新增，既有檔案不互改 |
+| `testdata/contracts/**` | Claude Code：與 `contracts/` 同版本的契約 fixture；既有根層 `location-sample-synthetic.ndjson` 由 contracts v1 PR 搬入 |
+| `testdata/device/**` | Codex：原生採集樣本 |
+| `testdata/` 其他既有檔案 | 雙方不互改；新增測資依上述子目錄歸屬 |
 | `docs/` | 雙方可新增；本文件變更需雙方確認 |
 | 根目錄 `01`–`05` 規劃文件、`USER_AGENT_PREFERENCES.md` | 使用者 |
+
+P0 過渡：PR #2 的原生採集、NDJSON、診斷畫面與既有 `mobile_data` 程式由 Codex 維護至交接生效；之後 Claude Code 接手 `mobile_data` 的新變更。跨層問題由兩方共同重現，依路徑擁有權分別修正。`LocationSample`、記錄狀態及原生紀錄格式的變更先在共同契約確認相容性，不得各自改出兩種格式。正式計時引擎只有 `timing_core` 一份，且不依賴伺服器或 UI timer。
+
+交接完成需同時滿足：
+
+1. Android 真機 30 分鐘與 2 小時各一次完整採集，含鎖屏區段。
+2. iPhone 真機 30 分鐘與 2 小時各一次完整採集，含鎖屏區段。
+3. 依 `05-mac-iphone-checklist.md` 的格式提交報告，附樣本數、間隔分布、序號缺口與耗電。
+4. 匯出的 NDJSON 通過當時版本的契約驗證器。
+5. 使用者在 PR #2 宣告交接生效。
+
+安裝成功、App 可啟動、CI 綠燈或 `flutter analyze` 通過均不構成交接條件。原生紀錄格式變更待 contracts v1 合併後才由各路徑擁有者實作；目前暫停真機採集。
 
 ## 4. 分支與工作目錄
 
@@ -118,7 +133,7 @@
 
 ## 10. 待定決策
 
-契約定案前必須由使用者或雙方確認，暫不假設答案：
+以下事項需由使用者或雙方確認；已完成事項保留在清單中供追蹤：
 
 1. 隊長離隊：強制移交 vs 解散車隊
 2. 每帳號單一位置發布者時，新分享工作階段如何取代舊工作階段（舊 socket 收到的訊息、是否有 grace period）
@@ -126,4 +141,9 @@
 4. schema → Dart／TypeScript 的生成工具選型與鎖版
 5. `sampleAgeMsAtSend` 的推算來源與跨裝置不可比性，須寫入文字規格
 6. 閾值（3s stale／15s offline／1 Hz 上傳／1 Hz 快照／4 KiB publish／64 KiB snapshot）確認為集中設定的起始值，非契約常數
-7. 本 repo 是否推上遠端、遠端平台與保護規則
+7. 已完成：repo 已在 GitHub，採 PR review／合併流程，禁止直接推送 `main`。
+8. `sourceType` 允許值及舊值遷移方式。
+9. `qualityFlags` 枚舉、未知旗標保留與消費端行為。
+10. `measurementMonotonicUs` 為 null 時的時間語義與品質標記。
+11. NDJSON 的 `recordType` 判別欄位及事件格式。
+12. 跨 boot 的序號恢復與 monotonic 時間域切換規則。
