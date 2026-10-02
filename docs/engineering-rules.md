@@ -81,7 +81,7 @@ P0 過渡：PR #2 的原生採集、NDJSON、診斷畫面與既有 `mobile_data`
 `contracts/` 由 Claude Code 主筆、Codex 驗證手機端可實作。
 
 1. **單一 PR 修改共同規格**，不得雙方各改一份再對齊。
-2. HTTP 用 OpenAPI、WebSocket 用 JSON Schema。Dart／TypeScript 模型或驗證器**由同一份 schema 產生**，生成工具在契約 PR 選定並鎖版；不人工維護兩份模型湊相容。
+2. HTTP 用 OpenAPI、WebSocket 用 JSON Schema。Dart／TypeScript 模型或驗證器**由同一份 schema 產生**，生成工具在契約 PR 選定並鎖版；不人工維護兩份模型湊相容。本機 `location-log` v1 暫採手寫 Dart 模型，以同一批合法／非法 fixtures 驗證；此例外不延伸至 HTTP／WebSocket 契約，待欄位穩定後重新評估生成器。
 3. 每次契約變更必須附：
    - 合法與非法 JSON 案例
    - 重連／下線／撤銷案例
