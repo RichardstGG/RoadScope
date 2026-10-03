@@ -131,19 +131,32 @@ P0 過渡：PR #2 的原生採集、NDJSON、診斷畫面與既有 `mobile_data`
 
 沒有使用者要求時，不自行衍生對方 AI 的任務。
 
-## 10. 待定決策
+## 10. 決策狀態
 
-以下事項需由使用者或雙方確認；已完成事項保留在清單中供追蹤：
+未決事項需由使用者或雙方確認。已決事項保留在清單中供追蹤，並指向決策紀錄；不要在未讀決策紀錄的情況下重新討論已決項目。
+
+### 未決：車隊契約（P4）
+
+以下阻擋車隊 HTTP／WebSocket 契約，不阻擋本機計時與資料：
 
 1. 隊長離隊：強制移交 vs 解散車隊
 2. 每帳號單一位置發布者時，新分享工作階段如何取代舊工作階段（舊 socket 收到的訊息、是否有 grace period）
 3. WSS token 過期處理：過期前重新認證 vs 關閉並重連
-4. schema → Dart／TypeScript 的生成工具選型與鎖版
 5. `sampleAgeMsAtSend` 的推算來源與跨裝置不可比性，須寫入文字規格
 6. 閾值（3s stale／15s offline／1 Hz 上傳／1 Hz 快照／4 KiB publish／64 KiB snapshot）確認為集中設定的起始值，非契約常數
-7. 已完成：repo 已在 GitHub，採 PR review／合併流程，禁止直接推送 `main`。
-8. `sourceType` 允許值及舊值遷移方式。
-9. `qualityFlags` 枚舉、未知旗標保留與消費端行為。
-10. `measurementMonotonicUs` 為 null 時的時間語義與品質標記。
-11. NDJSON 的 `recordType` 判別欄位及事件格式。
-12. 跨 boot 的序號恢復與 monotonic 時間域切換規則。
+
+### 已決
+
+編號沿用原清單，便於回溯舊討論。
+
+| # | 事項 | 結論 | 紀錄 |
+|---|---|---|---|
+| 4 | schema → Dart／TypeScript 的生成工具選型與鎖版 | **暫不導入生成器。** JSON Schema 為唯一真實來源，兩端以同一批 fixtures 對齊。僅限本機 `location-log` v1，見 §5 第 2 條的例外；待欄位穩定後重新評估 | [決策 0001](decisions/0001-location-log-format.md) D8 |
+| 7 | 本 repo 是否推上遠端、遠端平台與保護規則 | repo 已在 GitHub，採 PR review／合併流程，禁止直接推送 `main` | — |
+| 8 | `sourceType` 允許值及舊值遷移方式 | `phone_location`、`external_gnss`；`phone_gnss` 為過渡別名，P1 結束移除。`obd` 不屬於位置紀錄來源 | [決策 0001](decisions/0001-location-log-format.md) D5、D11 |
+| 9 | `qualityFlags` 枚舉、未知旗標保留與消費端行為 | `*_unavailable` 命名，null ⟺ 旗標雙向強制；未知旗標必須保留、不得視為有效 | [決策 0001](decisions/0001-location-log-format.md) D6 |
+| 10 | `measurementMonotonicUs` 為 null 時的時間語義與品質標記 | null 表來源無原生單調測量時鐘，消費端不得改用 `receivedMonotonicUs` 代替；配 `measurement_monotonic_unavailable` 旗標 | [決策 0001](decisions/0001-location-log-format.md) D7、D10 |
+| 11 | NDJSON 的 `recordType` 判別欄位及事件格式 | `recordType` 必填，缺少即非法、值未知則容忍；四種事件不佔用序號，以 `lastSequence` 定位 | [決策 0001](decisions/0001-location-log-format.md) D4、D9、D10 |
+| 12 | 跨 boot 的序號恢復與 monotonic 時間域切換規則 | `sequence` 以 `(recordingId, sourceId)` 為範圍並跨 boot 連續；`deviceBootId` 改變處為單調時間不連續點，須退回 UTC 並標記降級 | [契約 location-log v1](../contracts/location-log/v1/README.md) §7 |
+
+第 4、8–12 項的規範本文在 [`contracts/location-log/v1/README.md`](../contracts/location-log/v1/README.md)，可機器檢查的部分在同目錄的 `record.schema.json`，案例在 `testdata/contracts/location-log/v1/`。
