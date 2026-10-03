@@ -39,15 +39,22 @@ class DeviceBridgePlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Activ
                 result.success(null)
             }
             "status" -> result.success(LocationRecorderService.status(context))
-            "readLog" -> {
-                LocationRecorderService.readLog(context) { log, error ->
-                    Handler(Looper.getMainLooper()).post {
-                        if (error == null) result.success(log)
-                        else result.error("read_failed", error.message, null)
-                    }
-                }
+            "readLog" -> readFile(result) { done -> LocationRecorderService.readLog(context, done) }
+            // Diagnostics telemetry is a separate file, never merged into the log.
+            "readTelemetry" -> readFile(result) { done ->
+                LocationRecorderService.readTelemetry(context, done)
             }
             else -> result.notImplemented()
+        }
+    }
+
+    private fun readFile(result: MethodChannel.Result,
+        read: ((String?, Exception?) -> Unit) -> Unit) {
+        read { content, error ->
+            Handler(Looper.getMainLooper()).post {
+                if (error == null) result.success(content)
+                else result.error("read_failed", error.message, null)
+            }
         }
     }
 

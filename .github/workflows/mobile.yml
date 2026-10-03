@@ -63,6 +63,10 @@ jobs:
           node-version: '22'
       - run: npm ci --prefix contracts/tools
       - run: node contracts/tools/validate-location-log.mjs apps/mobile/build/device_bridge/native-log-fixtures/*.ndjson
+      # Diagnostics telemetry is a separate format with its own reader; running
+      # it here keeps the Kotlin writer and the Dart reader aligned.
+      - run: dart run bin/inspect_telemetry.dart --strict ../../apps/mobile/build/device_bridge/native-telemetry-fixtures/*.ndjson
+        working-directory: packages/device_bridge
 
   ios:
     runs-on: macos-15

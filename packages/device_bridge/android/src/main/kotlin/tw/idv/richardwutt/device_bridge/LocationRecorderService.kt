@@ -39,12 +39,22 @@ class LocationRecorderService : Service(), LocationListener {
             return File(File(context.filesDir, "recordings"), "$id.ndjson")
         }
 
+        /**
+         * Diagnostics telemetry lives in its own directory and its own file, so
+         * an export can never mix it with the `location-log` v1 record stream.
+         */
+        fun telemetryFile(context: Context): File? {
+            val id = prefs(context).getString("latestId", null) ?: return null
+            return File(File(context.filesDir, "diagnostics"), "$id.telemetry.ndjson")
+        }
+
         fun status(context: Context): Map<String, Any?> {
             val p = prefs(context)
             return mapOf(
                 "state" to (p.getString("state", "idle") ?: "idle"),
                 "recordingId" to p.getString("latestId", null),
                 "logPath" to logFile(context)?.absolutePath,
+                "telemetryPath" to telemetryFile(context)?.absolutePath,
                 "error" to p.getString("error", null),
                 "sampleAgeMs" to (instance?.lastMeasurementMonoUs ?: -1).let { mono ->
                     val age = (SystemClock.elapsedRealtimeNanos() / 1000 - mono) / 1000
@@ -53,11 +63,18 @@ class LocationRecorderService : Service(), LocationListener {
             )
         }
 
-        fun readLog(context: Context, result: (String?, Exception?) -> Unit) {
+        fun readLog(context: Context, result: (String?, Exception?) -> Unit) =
+            read(context, { logFile(it) }, result)
+
+        fun readTelemetry(context: Context, result: (String?, Exception?) -> Unit) =
+            read(context, { telemetryFile(it) }, result)
+
+        private fun read(context: Context, pick: (Context) -> File?,
+            result: (String?, Exception?) -> Unit) {
             val read = Runnable {
                 synchronized(accessLock) {
                     try {
-                        val file = logFile(context)
+                        val file = pick(context)
                         result(if (file?.exists() == true) file.readText() else "", null)
                     } catch (error: Exception) { result(null, error) }
                 }
@@ -72,6 +89,7 @@ class LocationRecorderService : Service(), LocationListener {
     private lateinit var worker: HandlerThread
     private lateinit var writer: LocationLogWriter
     private lateinit var handler: Handler
+    private var telemetry: DeviceStateMonitor? = null
     @Volatile private var destroyed = false
     @Volatile private var active = false
     @Volatile private var lastMeasurementMonoUs = -1L
@@ -91,6 +109,8 @@ class LocationRecorderService : Service(), LocationListener {
             handler.post {
                 if (destroyed) return@post
                 active = false
+                telemetry?.stop("stopped")
+                telemetry = null
                 prefs(this).edit().putString("state", "idle").remove("error").commit()
                 locationManager.removeUpdates(this)
                 stopForeground(STOP_FOREGROUND_REMOVE)
@@ -144,13 +164,43 @@ class LocationRecorderService : Service(), LocationListener {
                 p.getLong("bootAnchor", utcMs - monoUs / 1000))
             writer.start(utcMs, monoUs, resume)
             lastMeasurementMonoUs = -1L
-            p.edit().putString("latestId", id).putString("state", "recording").remove("error").commit()
+            val restarts = if (resume) p.getInt("restartCount", 0) + 1 else 0
+            p.edit().putString("latestId", id).putString("state", "recording")
+                .putInt("restartCount", restarts).remove("error").commit()
             persistClock()
+            startTelemetry(id, version, resume, restarts)
             // The first callback cannot overtake recording_started: both run here.
             active = true
             locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f,
                 this, worker.looper)
         } catch (error: Exception) { fail(error) }
+    }
+
+    /**
+     * Diagnostics telemetry is best-effort: a failure here must not stop the
+     * recording it is only meant to describe.
+     */
+    private fun startTelemetry(id: String, version: String, resume: Boolean, restarts: Int) {
+        try {
+            val monitor = DeviceStateMonitor(
+                context = applicationContext,
+                handler = handler,
+                writer = TelemetryLogWriter(
+                    File(File(filesDir, "diagnostics"), "$id.telemetry.ndjson"),
+                    id, "android-gps", version),
+                clock = { longArrayOf(System.currentTimeMillis(), SystemClock.elapsedRealtimeNanos() / 1000) },
+                bootId = { if (::writer.isInitialized) writer.bootId else null },
+                locationLogLastSequence = { if (::writer.isInitialized) writer.sequence - 1 else -1L },
+            )
+            telemetry = monitor
+            monitor.start(
+                serviceState = if (resume) "restarted" else "started",
+                restartCount = restarts,
+                resume = if (!resume) null else if (writer.bootResumed) "boot" else "process_restart",
+            )
+        } catch (_: Exception) {
+            telemetry = null
+        }
     }
 
     private fun persistClock() {
@@ -160,6 +210,8 @@ class LocationRecorderService : Service(), LocationListener {
 
     private fun fail(error: Exception) {
         active = false
+        telemetry?.stop("failed", error.message)
+        telemetry = null
         prefs(this).edit().putString("state", "error").putString("error", error.message).commit()
         locationManager.removeUpdates(this)
         stopSelf()
@@ -212,6 +264,8 @@ class LocationRecorderService : Service(), LocationListener {
     override fun onProviderDisabled(provider: String) {
         if (provider == LocationManager.GPS_PROVIDER) {
             active = false
+            telemetry?.stop("failed", "GPS location provider was disabled")
+            telemetry = null
             prefs(this).edit().putString("state", "error")
                 .putString("error", "GPS location provider was disabled").commit()
             stopSelf()
@@ -223,6 +277,11 @@ class LocationRecorderService : Service(), LocationListener {
         active = false
         if (instance === this) instance = null
         locationManager.removeUpdates(this)
+        // quitSafely still drains queued work, so the closing row can be written.
+        handler.post {
+            telemetry?.stop("stopped", "recorder service destroyed")
+            telemetry = null
+        }
         worker.quitSafely()
         super.onDestroy()
     }

@@ -14,11 +14,20 @@ public class DeviceBridgePlugin: NSObject, FlutterPlugin, CLLocationManagerDeleg
   private var bootId = ""
   private var bootAnchor: Int64 = 0
   private let thresholdMs: Int64 = 60_000
+  private var telemetry: DeviceTelemetryMonitor?
   private var recordingId: String? { defaults.string(forKey: "roadscope.recordingId") }
   private var logURL: URL? {
     guard let id = recordingId else { return nil }
     return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
       .appendingPathComponent("recordings", isDirectory: true).appendingPathComponent("\(id).ndjson")
+  }
+  /// Diagnostics telemetry gets its own directory and file so an export can
+  /// never mix it with the location-log v1 record stream.
+  private var telemetryURL: URL? {
+    guard let id = recordingId else { return nil }
+    return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+      .appendingPathComponent("diagnostics", isDirectory: true)
+      .appendingPathComponent("\(id).telemetry.ndjson")
   }
 
   public static func register(with registrar: FlutterPluginRegistrar) {
@@ -56,6 +65,8 @@ public class DeviceBridgePlugin: NSObject, FlutterPlugin, CLLocationManagerDeleg
         result(FlutterError(code: "location_disabled", message: "Enable Location Services", details: nil))
       }
     case "stop":
+      telemetry?.stop(serviceState: "stopped")
+      telemetry = nil
       manager.stopUpdatingLocation()
       manager.allowsBackgroundLocationUpdates = false
       defaults.set(false, forKey: "roadscope.active")
@@ -68,15 +79,22 @@ public class DeviceBridgePlugin: NSObject, FlutterPlugin, CLLocationManagerDeleg
         "state": defaults.string(forKey: "roadscope.state") ?? "idle",
         "recordingId": (recordingId as Any?) ?? NSNull(),
         "logPath": (logURL?.path as Any?) ?? NSNull(),
+        "telemetryPath": (telemetryURL?.path as Any?) ?? NSNull(),
         "error": (defaults.string(forKey: "roadscope.error") as Any?) ?? NSNull(),
         "sampleAgeMs": sampleAgeMs() as Any,
       ])
     case "readLog":
-      if let url = logURL, FileManager.default.fileExists(atPath: url.path) {
-        result((try? String(contentsOf: url, encoding: .utf8)) ?? "")
-      } else { result("") }
+      result(read(logURL))
+    // Diagnostics telemetry is a separate file, never merged into the log.
+    case "readTelemetry":
+      result(read(telemetryURL))
     default: result(FlutterMethodNotImplemented)
     }
+  }
+
+  private func read(_ url: URL?) -> String {
+    guard let url, FileManager.default.fileExists(atPath: url.path) else { return "" }
+    return (try? String(contentsOf: url, encoding: .utf8)) ?? ""
   }
 
   private var lastReceivedMono: Int64?
@@ -164,6 +182,24 @@ public class DeviceBridgePlugin: NSObject, FlutterPlugin, CLLocationManagerDeleg
     if resuming { try event("recording_resumed", now, mono, ["reason": rebooted ? "boot" : "process_restart", "resumedSequence": sequence]) }
     persistClock()
     lastReceivedMono = nil
+    startTelemetry(appVersion: "\(version)+\(build)", resumed: resuming, rebooted: rebooted)
+  }
+
+  /// Diagnostics telemetry is best-effort: a failure here must not stop the
+  /// recording it is only meant to describe.
+  private func startTelemetry(appVersion: String, resumed: Bool, rebooted: Bool) {
+    telemetry?.stop(serviceState: "restarted", detail: "superseded by a new location segment")
+    guard let url = telemetryURL, let id = recordingId else { telemetry = nil; return }
+    let restarts = resumed ? defaults.integer(forKey: "roadscope.restartCount") + 1 : 0
+    defaults.set(restarts, forKey: "roadscope.restartCount")
+    let monitor = DeviceTelemetryMonitor(
+      writer: DiagnosticsTelemetryWriter(url: url, recordingId: id,
+        sourceId: "ios-corelocation", appVersion: appVersion),
+      deviceBootId: { [weak self] in self?.bootId },
+      locationLogLastSequence: { [weak self] in (self?.sequence ?? 0) - 1 })
+    telemetry = monitor
+    monitor.start(serviceState: resumed ? "restarted" : "started", restartCount: restarts,
+      resume: resumed ? (rebooted ? "boot" : "process_restart") : nil)
   }
 
   public func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
@@ -240,15 +276,9 @@ public class DeviceBridgePlugin: NSObject, FlutterPlugin, CLLocationManagerDeleg
     try handle.synchronize()
   }
 
-  private func monotonicUs() -> Int64 {
-    var info = mach_timebase_info_data_t()
-    mach_timebase_info(&info)
-    let ticks = mach_continuous_time()
-    // Quotient/remainder avoids overflowing ticks * numer on long device uptime.
-    let denominator = UInt64(info.denom) * 1000
-    return Int64((ticks / denominator) * UInt64(info.numer) +
-      (ticks % denominator) * UInt64(info.numer) / denominator)
-  }
+  // Shared with the telemetry writer so both logs use one sleep-inclusive
+  // monotonic time domain; see MonotonicClock in DiagnosticsTelemetry.swift.
+  private func monotonicUs() -> Int64 { MonotonicClock.continuousMicroseconds() }
   private func utcMs(_ date: Date) -> Int64 { Int64(date.timeIntervalSince1970 * 1000) }
   private func persistClock() {
     defaults.set(bootId, forKey: "roadscope.bootId")
@@ -261,6 +291,8 @@ public class DeviceBridgePlugin: NSObject, FlutterPlugin, CLLocationManagerDeleg
   }
   private func logError(_ message: String) -> NSError { NSError(domain: "RoadScope", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
   private func fail(_ message: String) {
+    telemetry?.stop(serviceState: "failed", detail: message)
+    telemetry = nil
     manager.stopUpdatingLocation()
     segmentStarted = false
     defaults.set(false, forKey: "roadscope.active")
