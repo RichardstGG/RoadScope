@@ -17,6 +17,7 @@ class DeviceBridge {
       recordingId: raw['recordingId'] as String?,
       logPath: raw['logPath'] as String?,
       error: raw['error'] as String?,
+      sampleAgeMs: (raw['sampleAgeMs'] as num?)?.toDouble(),
     );
   }
 
@@ -30,12 +31,14 @@ class RecorderStatus {
     this.recordingId,
     this.logPath,
     this.error,
+    this.sampleAgeMs,
   });
 
   final String state;
   final String? recordingId;
   final String? logPath;
   final String? error;
+  final double? sampleAgeMs;
 
   bool get isRecording => state == 'recording';
 }

@@ -1,4 +1,6 @@
-/// Raw location update. The shared contract is still under review.
+import 'location_log_validator.dart';
+
+/// Raw location update from location-log v1.
 class LocationSample {
   LocationSample({
     required this.recordingId,
@@ -84,6 +86,10 @@ class LocationSample {
   final List<String> qualityFlags;
 
   factory LocationSample.fromJson(Map<String, Object?> json) {
+    final findings = validateSampleFields(json, 1);
+    if (findings.isNotEmpty) {
+      throw FormatException(findings.map((f) => f.code).join(', '));
+    }
     if (json['schemaVersion'] != currentSchemaVersion) {
       throw const FormatException('unsupported LocationSample schemaVersion');
     }
@@ -125,7 +131,9 @@ class LocationSample {
     return LocationSample(
       recordingId: requiredValue<String>('recordingId'),
       sourceId: requiredValue<String>('sourceId'),
-      sourceType: requiredValue<String>('sourceType'),
+      sourceType: json['sourceType'] == 'phone_gnss'
+          ? 'phone_location'
+          : requiredValue<String>('sourceType'),
       deviceBootId: requiredValue<String>('deviceBootId'),
       sequence: requiredValue<int>('sequence'),
       measuredAtUtc: utc('measuredAtUtc'),
@@ -145,6 +153,7 @@ class LocationSample {
 
   Map<String, Object?> toJson() => {
     'schemaVersion': currentSchemaVersion,
+    'recordType': 'sample',
     'recordingId': recordingId,
     'sourceId': sourceId,
     'sourceType': sourceType,

@@ -21,6 +21,7 @@ void main() {
             'state': 'recording',
             'recordingId': 'rec-1',
             'logPath': '/tmp/rec-1.ndjson',
+            'sampleAgeMs': 1250,
           },
           'readLog' => '{"sample":1}\n',
           _ => null,
@@ -31,6 +32,7 @@ void main() {
       final status = await bridge.status();
       expect(status.isRecording, isTrue);
       expect(status.recordingId, 'rec-1');
+      expect(status.sampleAgeMs, 1250.0);
       expect(await bridge.readLog(), '{"sample":1}\n');
       await bridge.stop();
       expect(calls, ['start', 'status', 'readLog', 'stop']);

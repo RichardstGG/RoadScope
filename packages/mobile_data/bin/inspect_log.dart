@@ -11,6 +11,13 @@ void main(List<String> args) {
   final report = LocationSampleImporter().addNdjson(
     File(args.single).readAsStringSync(),
   );
+  for (final finding in report.findings) {
+    stdout.writeln(finding);
+  }
+  stdout.writeln(
+    'Events: ${report.events.length}; unknown records: ${report.unknownRecords.length}',
+  );
+  if (!report.ok) exitCode = 1;
   final samples = report.allSamples;
   if (samples.isEmpty) {
     stderr.writeln('No valid samples; invalid lines: ${report.invalidLines}');

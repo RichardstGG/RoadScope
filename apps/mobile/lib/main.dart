@@ -28,6 +28,8 @@ class RecorderScreen extends StatefulWidget {
   State<RecorderScreen> createState() => _RecorderScreenState();
 }
 
+const staleSampleAgeMs = 5000.0;
+
 class _RecorderScreenState extends State<RecorderScreen>
     with WidgetsBindingObserver {
   final DeviceBridge _bridge = const DeviceBridge();
@@ -131,15 +133,26 @@ class _RecorderScreenState extends State<RecorderScreen>
     final status = _status;
     final samples = _report?.allSamples ?? const <LocationSample>[];
     final previous = samples.length < 2 ? null : samples[samples.length - 2];
-    final interval =
-        sample == null ||
-            previous == null ||
-            sample.deviceBootId != previous.deviceBootId
+    final interval = sample == null || previous == null
         ? null
-        : ((sample.measurementMonotonicUs ?? sample.receivedMonotonicUs) -
-                  (previous.measurementMonotonicUs ??
-                      previous.receivedMonotonicUs)) /
+        : sample.deviceBootId == previous.deviceBootId &&
+              sample.measurementMonotonicUs != null &&
+              previous.measurementMonotonicUs != null
+        ? (sample.measurementMonotonicUs! - previous.measurementMonotonicUs!) /
+              1000000
+        : sample.measuredAtUtc
+                  .difference(previous.measuredAtUtc)
+                  .inMicroseconds /
               1000000;
+    final age = status?.sampleAgeMs;
+    final fresh =
+        status?.isRecording == true &&
+        _error == null &&
+        _report?.ok == true &&
+        sample != null &&
+        age != null &&
+        age >= 0 &&
+        age <= staleSampleAgeMs;
     return Scaffold(
       appBar: AppBar(title: const Text('RoadScope 定位診斷')),
       body: SafeArea(
@@ -164,20 +177,33 @@ class _RecorderScreenState extends State<RecorderScreen>
               ),
             const SizedBox(height: 16),
             Text(
-              sample?.speedMps == null
+              !fresh || sample.speedMps == null
                   ? '-- km/h'
-                  : '${(sample!.speedMps! * 3.6).toStringAsFixed(1)} km/h',
+                  : '${(sample.speedMps! * 3.6).toStringAsFixed(1)} km/h',
               style: Theme.of(context).textTheme.displayMedium,
             ),
             const SizedBox(height: 12),
+            _detail('定位狀態', fresh ? '有新定位' : '無新定位／樣本已過期'),
+            _detail('樣本年齡', age == null ? '尚無資料' : _number(age / 1000, '秒')),
             _detail(
               '樣本時間（UTC）',
               sample?.measuredAtUtc.toIso8601String() ?? '尚無樣本',
             ),
             _detail('樣本間隔', interval == null ? '尚無資料' : _number(interval, '秒')),
+            if (sample != null &&
+                previous != null &&
+                (sample.deviceBootId != previous.deviceBootId ||
+                    sample.measurementMonotonicUs == null ||
+                    previous.measurementMonotonicUs == null))
+              const Text('間隔以測量 UTC 推算，可能受校時影響。'),
             _detail('水平精度', _number(sample?.horizontalAccuracyM, '公尺')),
             _detail('速度精度', _number(sample?.speedAccuracyMps, '公尺／秒')),
             _detail('累計樣本', '${samples.length}'),
+            _detail(
+              '事件／警告',
+              '${_report?.events.length ?? 0}／${_report?.findings.where((f) => !f.isError).length ?? 0}',
+            ),
+            const Text('診斷版 0.0.2+2 · location-log v1'),
             _detail('無效紀錄行', '${_report?.invalidLines ?? 0}'),
             const SizedBox(height: 20),
             FilledButton.icon(
@@ -195,11 +221,17 @@ class _RecorderScreenState extends State<RecorderScreen>
               ),
             ),
             OutlinedButton.icon(
-              onPressed: status?.logPath == null ? null : _export,
+              onPressed:
+                  _busy ||
+                      status?.logPath == null ||
+                      status?.isRecording == true ||
+                      status?.state == 'waiting_permission'
+                  ? null
+                  : _export,
               icon: const Icon(Icons.share),
               label: const Text('匯出診斷 NDJSON'),
             ),
-            const Text('匯出檔案包含精確位置；分享前請確認接收對象。'),
+            const Text('請先停止記錄再匯出；檔案包含精確位置，分享前請確認接收對象。'),
           ],
         ),
       ),

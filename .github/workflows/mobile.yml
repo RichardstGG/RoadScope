@@ -7,6 +7,8 @@ on:
       - apps/mobile/**
       - packages/**
       - docs/mobile-toolchain.md
+      - contracts/location-log/**
+      - testdata/contracts/location-log/**
   push:
     branches: [main]
     paths:
@@ -14,6 +16,8 @@ on:
       - apps/mobile/**
       - packages/**
       - docs/mobile-toolchain.md
+      - contracts/location-log/**
+      - testdata/contracts/location-log/**
   workflow_dispatch:
 
 permissions:
@@ -52,6 +56,13 @@ jobs:
         working-directory: apps/mobile
       - run: flutter build apk --debug
         working-directory: apps/mobile
+      - run: ./gradlew :device_bridge:testDebugUnitTest --console=plain
+        working-directory: apps/mobile/android
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - run: npm ci --prefix contracts/tools
+      - run: node contracts/tools/validate-location-log.mjs apps/mobile/build/device_bridge/native-log-fixtures/*.ndjson
 
   ios:
     runs-on: macos-15

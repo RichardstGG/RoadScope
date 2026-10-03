@@ -1,7 +1,9 @@
 # RoadScope mobile_data
 
-P0 本機 `LocationSample` 格式依根目錄 `02-contract-draft.md` 的最小欄位製作，目前仍待 Claude Code 校對並定版。原生 Android／iOS 追加寫入每行一筆 JSON（NDJSON）；`LocationSampleImporter` 依 `(recordingId, sourceId, sequence)` 去重並排序。重新讀取完整檔案可還原相同樣本集合；同鍵而內容不同會回報衝突，保留首筆。檔尾不完整 JSON 會列為無效行，原生端重啟時會截去不完整檔尾。
+P0 依 `contracts/location-log/v1` 匯入原生 NDJSON；手寫 Dart 模型的範圍依共同規則 §5。`LocationSampleImporter.addNdjson` 每次接收完整檔案，逐行驗證，再依 `(recordingId, sourceId, sequence)` 去重並排序。重新匯入相同檔案為冪等；單一檔案內的重複序號或內容衝突屬 error，保留首筆。截斷或非法行會回報錯誤並繼續解析後續行。`report.ok` 區分 error 與非致命 warning；不能只以有無樣本判斷檔案有效性。
 
-所有 UTC 欄位為 RFC3339 `Z` 字串；速度為 m/s、精度為公尺、單調時間為微秒。Android `measurementMonotonicUs` 使用 `Location.elapsedRealtimeNanos`；iOS 的 `CLLocation.timestamp` 只有 UTC，故 `measurementMonotonicUs=null` 並加 `measurement_monotonic_unavailable`。兩端收到時間的 monotonic 值只用於同一 `deviceBootId` 的 callback 間隔，不假裝成測量時間。來源為 `phone_gnss`，iOS `sourceId=ios-corelocation`，Android `sourceId=android-gps`。無效或缺失數值為 `null`，品質旗標目前為 `invalid_speed`、`invalid_heading`、`invalid_horizontal_accuracy`、`invalid_speed_accuracy`、`invalid_altitude`。
+所有 UTC 欄位為 RFC3339 `Z` 字串；速度為 m/s、精度為公尺、單調時間為微秒。iOS `measurementMonotonicUs=null`，附 `measurement_monotonic_unavailable`，不得用接收單調時間替代測量間隔。量測欄位的 null 與 `*_unavailable` 旗標須雙向一致。`phone_gnss` 過渡別名匯入後映射成 `phone_location`，附警告；原始紀錄檔不改寫。
 
-`testdata/location-sample-synthetic.ndjson` 為合成資料，不能當真機證據。本版格式尚未對外發布；若共同契約改動欄名、時間來源或旗標，需同時更新兩端寫入器、匯入器、合成案例與回放測試。請 Claude Code 先確認：`sourceType` 枚舉、旗標名稱、iOS 無測量 monotonic 的表示、UTC 校時事件如何與樣本關聯，以及序號在同一 recording/source 的重啟語義。共同 schema 應在 `contracts/` 的契約 PR 定義，這裡不建立第二份網路 API 模型。
+未知 recordType／eventType／qualityFlags 保留並警告，缺少 recordType 為 error。`report.events` 及 `report.unknownRecords` 保留原始行；App 匯出原生原檔，維持行順序及未知欄位。既有根層 `testdata/location-sample-synthetic.ndjson` 是 pre-contract 格式，不再作為合法案例；本套件使用 `testdata/contracts/location-log/v1` 的共同 21 個 fixtures，另測試重播、未知事件、衝突與 null 旗標。
+
+`flutter test` 執行 fixtures 與匯入測試；`dart run bin/inspect_log.dart <檔案>` 顯示契約錯誤碼、警告、樣本數及 callback 間隔，有 error 時回傳非零 exit code。所有合成案例皆非真機證據。

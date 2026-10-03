@@ -5,6 +5,8 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Handler
+import android.os.Looper
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
@@ -38,8 +40,12 @@ class DeviceBridgePlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Activ
             }
             "status" -> result.success(LocationRecorderService.status(context))
             "readLog" -> {
-                val path = LocationRecorderService.logFile(context)
-                result.success(if (path?.exists() == true) path.readText() else "")
+                LocationRecorderService.readLog(context) { log, error ->
+                    Handler(Looper.getMainLooper()).post {
+                        if (error == null) result.success(log)
+                        else result.error("read_failed", error.message, null)
+                    }
+                }
             }
             else -> result.notImplemented()
         }

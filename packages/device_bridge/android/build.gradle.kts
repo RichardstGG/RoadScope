@@ -53,6 +53,7 @@ android {
             isIncludeAndroidResources = true
             all {
                 it.useJUnitPlatform()
+                it.systemProperty("roadscope.nativeOutput", layout.buildDirectory.dir("native-log-fixtures").get().asFile.absolutePath)
 
                 it.outputs.upToDateWhen { false }
 
@@ -72,6 +73,7 @@ kotlin {
 }
 
 dependencies {
-    testImplementation("org.jetbrains.kotlin:kotlin-test")
-    testImplementation("org.mockito:mockito-core:5.0.0")
+    testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher:1.10.2")
+    testImplementation("org.json:json:20240303")
 }

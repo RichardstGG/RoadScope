@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter/services.dart';
 import 'package:roadscope/main.dart';
@@ -53,5 +55,31 @@ void main() {
     await tester.pump();
     expect(find.text('開始記錄'), findsOneWidget);
     expect(calls, containsAllInOrder(['start', 'stop']));
+  });
+  testWidgets('定位逾期後隱藏舊速度，收到新定位後恢復', (tester) async {
+    var age = 1000.0;
+    final text = File(
+      '../../testdata/contracts/location-log/v1/valid/01-android-minimal.ndjson',
+    ).readAsStringSync();
+    messenger.setMockMethodCallHandler(
+      channel,
+      (call) async => switch (call.method) {
+        'status' => <String, Object?>{'state': 'recording', 'sampleAgeMs': age},
+        'readLog' => text,
+        _ => null,
+      },
+    );
+    await tester.pumpWidget(const RoadScopeApp());
+    await tester.pump();
+    expect(find.text('-- km/h'), findsNothing);
+    age = staleSampleAgeMs + 1;
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pump();
+    expect(find.text('-- km/h'), findsOneWidget);
+    expect(find.textContaining('無新定位'), findsOneWidget);
+    age = 0;
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pump();
+    expect(find.text('-- km/h'), findsNothing);
   });
 }
