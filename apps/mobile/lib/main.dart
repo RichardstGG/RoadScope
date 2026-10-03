@@ -37,6 +37,7 @@ class _RecorderScreenState extends State<RecorderScreen>
   RecorderStatus? _status;
   LocationSample? _latest;
   LocationImportReport? _report;
+  TelemetryReadReport? _telemetry;
   String? _error;
   bool _busy = false;
   bool _polling = false;
@@ -69,10 +70,13 @@ class _RecorderScreenState extends State<RecorderScreen>
       final log = await _bridge.readLog();
       final report = LocationSampleImporter().addNdjson(log);
       final samples = report.allSamples;
+      // Separate file, separate reader: telemetry never enters the log import.
+      final telemetry = await _bridge.telemetry();
       if (!mounted) return;
       setState(() {
         _status = status;
         _report = report;
+        _telemetry = telemetry;
         _latest = samples.isEmpty ? null : samples.last;
         _error = null;
       });
@@ -101,15 +105,13 @@ class _RecorderScreenState extends State<RecorderScreen>
     }
   }
 
-  Future<void> _export() async {
-    final path = _status?.logPath;
+  /// Each format is exported on its own, with its own wording, so a receiver
+  /// can never mistake diagnostics telemetry for a location-log v1 file.
+  Future<void> _export(String? path, String text) async {
     if (path == null) return;
     try {
       await SharePlus.instance.share(
-        ShareParams(
-          files: [XFile(path)],
-          text: 'RoadScope 診斷紀錄；包含精確位置，請只分享給信任的接收者。',
-        ),
+        ShareParams(files: [XFile(path)], text: text),
       );
     } catch (error) {
       if (mounted) setState(() => _error = error.toString());
@@ -126,6 +128,112 @@ class _RecorderScreenState extends State<RecorderScreen>
 
   String _number(double? value, String unit, {int digits = 1}) =>
       value == null ? '無效／未提供' : '${value.toStringAsFixed(digits)} $unit';
+
+  /// `null` is never shown as `false`: an unobservable state reads
+  /// "無法取得（not available）", and an enum the platform reported as unknown
+  /// reads "未知（unknown）".
+  String _flag(bool? value, String yes, String no) =>
+      value == null ? '無法取得（not available）' : (value ? yes : no);
+
+  String _enumLabel(String? value, Map<String, String> labels) {
+    if (value == null || value.isEmpty) return '無法取得（not available）';
+    if (value == 'unknown') return '未知（unknown）';
+    return labels[value] ?? '$value（未知值）';
+  }
+
+  List<Widget> _telemetrySection(BuildContext context) {
+    final report = _telemetry;
+    final record = report?.latest;
+    final telemetryPath = _status?.telemetryPath;
+    final exportable =
+        telemetryPath != null && (report?.records.isNotEmpty ?? false);
+    return [
+      const Divider(height: 32),
+      Text(
+        '診斷 telemetry（非 location-log v1）',
+        style: Theme.of(context).textTheme.titleMedium,
+      ),
+      if (record == null)
+        const Text('尚無 telemetry 紀錄；開始記錄後才會寫入。')
+      else ...[
+        _detail(
+          '電量',
+          record.batteryPercent == null
+              ? '無法取得（not available）'
+              : '${record.batteryPercent}%',
+        ),
+        _detail('充電狀態', _flag(record.batteryCharging, '充電中', '未充電')),
+        _detail(
+          '電源來源',
+          _enumLabel(record.batteryPowerSource, const {
+            'ac': '市電',
+            'usb': 'USB',
+            'wireless': '無線充電',
+            'dock': '底座',
+            'none': '未接外部電源',
+          }),
+        ),
+        _detail('省電模式', _flag(record.powerSaveMode, '開啟', '關閉')),
+        _detail(
+          'App 狀態',
+          _enumLabel(record.appLifecycle, const {
+            'foreground': '前景',
+            'inactive': '前景但未接受輸入',
+            'background': '背景',
+          }),
+        ),
+        _detail('螢幕可互動', _flag(record.screenInteractive, '是', '否')),
+        _detail('keyguard 狀態', _flag(record.keyguardLocked, '已上鎖', '未上鎖')),
+        _detail(
+          'iOS 保護資料可用',
+          _flag(record.protectedDataAvailable, '可用', '不可用'),
+        ),
+        _detail('螢幕狀態來源', record.screenStateSource),
+        _detail(
+          '定位服務狀態',
+          _enumLabel(record.locationServiceState, const {
+            'started': '已啟動',
+            'stopped': '已停止',
+            'restarted': '已重建',
+            'failed': '失敗',
+          }),
+        ),
+        if (record.locationServiceDetail != null)
+          _detail('定位服務說明', record.locationServiceDetail!),
+        _detail('程序重啟次數', '${record.processRestartCount}'),
+        _detail(
+          '恢復原因',
+          record.resumeReason == null
+              ? '本次非恢復'
+              : _enumLabel(record.resumeReason, const {
+                  'process_restart': '程序重啟',
+                  'crash': '崩潰後恢復',
+                  'boot': '重開機後恢復',
+                }),
+        ),
+        _detail(
+          'telemetry 時間（UTC）',
+          record.occurredAtUtc?.toIso8601String() ?? '無法取得（not available）',
+        ),
+        _detail(
+          'telemetry 單調時間',
+          record.occurredMonotonicUs == null
+              ? '無法取得（not available）'
+              : '${record.occurredMonotonicUs} µs',
+        ),
+        _detail('對應的最後定位序號', '${record.locationLogLastSequence}'),
+        _detail('觸發原因', record.trigger),
+        _detail(
+          'telemetry 筆數／壞行',
+          '${report!.records.length}／${report.badLines}',
+        ),
+        if (record.unavailable.isNotEmpty)
+          _detail('無法取得的欄位', record.unavailable.join('、')),
+      ],
+      _detail('telemetry 可匯出', exportable ? '可匯出' : '目前不可匯出'),
+      const Text('telemetry 是事後判讀用的診斷資訊，不證明背景採集穩定。'),
+    ];
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -144,6 +252,8 @@ class _RecorderScreenState extends State<RecorderScreen>
                   .difference(previous.measuredAtUtc)
                   .inMicroseconds /
               1000000;
+    final stopped =
+        status?.isRecording != true && status?.state != 'waiting_permission';
     final age = status?.sampleAgeMs;
     final fresh =
         status?.isRecording == true &&
@@ -221,17 +331,34 @@ class _RecorderScreenState extends State<RecorderScreen>
               ),
             ),
             OutlinedButton.icon(
+              onPressed: _busy || !stopped || status?.logPath == null
+                  ? null
+                  : () => _export(
+                      status!.logPath,
+                      'RoadScope location-log v1 定位紀錄；包含精確位置，請只分享給信任的接收者。',
+                    ),
+              icon: const Icon(Icons.share),
+              label: const Text('匯出 location-log v1'),
+            ),
+            OutlinedButton.icon(
               onPressed:
                   _busy ||
-                      status?.logPath == null ||
-                      status?.isRecording == true ||
-                      status?.state == 'waiting_permission'
+                      !stopped ||
+                      status?.telemetryPath == null ||
+                      (_telemetry?.records.isEmpty ?? true)
                   ? null
-                  : _export,
-              icon: const Icon(Icons.share),
-              label: const Text('匯出診斷 NDJSON'),
+                  : () => _export(
+                      status!.telemetryPath,
+                      'RoadScope diagnostics telemetry；裝置與 App 狀態診斷，不含位置資料。',
+                    ),
+              icon: const Icon(Icons.share_outlined),
+              label: const Text('匯出 diagnostics telemetry'),
             ),
-            const Text('請先停止記錄再匯出；檔案包含精確位置，分享前請確認接收對象。'),
+            const Text(
+              '請先停止記錄再匯出。兩個檔案分開匯出：location-log v1 含精確位置，'
+              'diagnostics telemetry 只含裝置與 App 狀態。',
+            ),
+            ..._telemetrySection(context),
           ],
         ),
       ),

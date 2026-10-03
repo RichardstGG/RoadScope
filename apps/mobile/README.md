@@ -6,7 +6,11 @@ Flutter 3.47.3 診斷 App，版本 `0.0.2+2`，識別碼 `tw.idv.richardwutt.roa
 
 升級時保留舊紀錄檔，但正式匯入器不支援缺少 `recordType` 的舊格式，也不會把新格式追加到舊檔。若啟動時顯示舊格式錯誤，先匯出保留，再開始新紀錄。不要用解除安裝的方式升級，以免刪掉本機資料。
 
-這一版沒有新增電量、鎖屏或前後台 telemetry；測試時仍需手動註記這些狀態。新增事件格式須先與契約擁有者協調。
+畫面下半部顯示最近一筆**診斷 telemetry**：電量與充電狀態、App 前後台、可觀測的螢幕／keyguard 狀態、定位服務狀態、telemetry 時間，以及 telemetry 檔是否可匯出。不可得的值一律顯示「無法取得（not available）」，平台回報為未知的列舉顯示「未知（unknown）」，不會把未知當成正常或 `false`。Android 的螢幕欄位來自 `PowerManager.isInteractive()` 與 `KeyguardManager.isKeyguardLocked()`；iOS 沒有公開可靠的鎖屏 API，那兩個欄位恆為空值，只保留 `protectedDataAvailable` 這個弱訊號。telemetry 是事後判讀用的診斷資訊，**不證明背景採集穩定**，程序被系統暫停期間也不會有紀錄。
+
+telemetry 寫在獨立檔案（Android `<filesDir>/diagnostics/<recordingId>.telemetry.ndjson`、iOS `Documents/diagnostics/<recordingId>.telemetry.ndjson`），有自己的 `telemetryVersion` 與序號空間，不含位置資料，也沒有動到 `location-log` v1 的任何欄位、`recordType`、`eventType` 或序號規則。欄位表、平台限制、判讀方式與尚未驗證的項目見 [`docs/diagnostics-telemetry.md`](../../docs/diagnostics-telemetry.md)。要把 telemetry 欄位放進正式定位紀錄，仍須先與契約擁有者協調。
+
+匯出分成兩個按鈕，都需先停止記錄：「匯出 location-log v1」（含精確座標）與「匯出 diagnostics telemetry」（只含裝置與 App 狀態）。兩者分享文字各自標明格式，不混在同一個檔案或同一次分享裡。
 
 ## 開發與建置
 
@@ -37,15 +41,21 @@ node contracts/tools/validate-location-log.mjs /absolute/path/to/exported.ndjson
 
 | 測試 | 操作 | 應記錄的證據 |
 | --- | --- | --- |
-| 30 分鐘 | 前景 5 分鐘、鎖屏 20 分鐘、返回前景 5 分鐘；再按停止及匯出 | 記錄 ID、樣本數、前後時間、鎖屏期間是否仍有樣本、最大 callback 間隔、錯誤／品質旗標、電量變化 |
-| 2 小時 | 前景 10 分鐘、鎖屏 100 分鐘、返回前景 10 分鐘；停止及匯出 | 同上，另記手機溫度／系統省電模式、記錄檔大小、是否有服務或 App 重啟、序號缺口 |
+| 30 分鐘 | 前景 5 分鐘、鎖屏 20 分鐘、返回前景 5 分鐘；再按停止及匯出 | 記錄 ID、樣本數、前後時間、鎖屏期間是否仍有樣本、最大 callback 間隔、錯誤／品質旗標、電量變化；另附 telemetry 匯出檔與其中的螢幕／前後台轉換 |
+| 2 小時 | 前景 10 分鐘、鎖屏 100 分鐘、返回前景 10 分鐘；停止及匯出 | 同上，另記手機溫度／系統省電模式、記錄檔大小、是否有服務或 App 重啟、序號缺口；telemetry 的 `processRestartCount`、`resumeReason` 與 telemetry 時間缺口 |
 | 恢復檢查 | 記錄途中正常切換其他 App、回到 RoadScope；另用獨立短測試重新啟動 App | 回來後同一記錄 ID、序號連續性、無重複樣本；若系統或使用者強制停止，寫明實際行為 |
 | 權限檢查 | 獨立短測試撤銷定位／關閉 GPS，再回 App | 顯示錯誤或無樣本的實際狀態，不可把無定位當成有效速度 0 |
 
-將匯出檔安全複製到電腦後，在 `packages/mobile_data` 執行：
+將匯出檔安全複製到電腦後，在 `packages/mobile_data` 檢查定位紀錄：
 
 ```sh
 dart run bin/inspect_log.dart /absolute/path/to/exported.ndjson
+```
+
+在 `packages/device_bridge` 檢查 telemetry：
+
+```sh
+dart run bin/inspect_telemetry.dart /absolute/path/to/exported.telemetry.ndjson
 ```
 
 請保存命令輸出、開始／結束 UTC 與測試紀錄，並回報任何 >5 秒空窗的當時螢幕／電源狀態。`callback gaps` 是原生收到樣本的間隔，並非定位或計時精度。完成兩種時長和兩平台測試後，才能對背景穩定性提出實測結論；目前尚未取得真機證據。
