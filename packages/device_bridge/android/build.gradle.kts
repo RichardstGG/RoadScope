@@ -54,6 +54,9 @@ android {
             all {
                 it.useJUnitPlatform()
                 it.systemProperty("roadscope.nativeOutput", layout.buildDirectory.dir("native-log-fixtures").get().asFile.absolutePath)
+                // Diagnostics telemetry has its own directory: the location-log
+                // validator must never be pointed at a telemetry file.
+                it.systemProperty("roadscope.telemetryOutput", layout.buildDirectory.dir("native-telemetry-fixtures").get().asFile.absolutePath)
 
                 it.outputs.upToDateWhen { false }
 

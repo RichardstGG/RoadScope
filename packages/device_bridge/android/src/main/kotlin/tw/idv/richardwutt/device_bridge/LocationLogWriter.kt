@@ -87,6 +87,9 @@ internal class LocationLogWriter(
 
     private var resumedAfterBoot = false
 
+    /** Whether the last [start] looked like a reboot rather than a process restart. */
+    val bootResumed get() = resumedAfterBoot
+
     fun sample(record: JSONObject, utcMs: Long, monoUs: Long) {
         val anchor = utcMs - monoUs / 1000
         if (kotlin.math.abs(anchor - bootAnchor) >= thresholdMs) {
