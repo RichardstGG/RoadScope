@@ -164,6 +164,7 @@ Android，鎖屏那一刻（為閱讀換行，實際為單行）：
 - **電量**：以 `occurredAtUtc` 搭配 `batteryPercent` 計算一段時間的耗電。`batteryCharging` 為 true 的區段要排除。單次測量不構成續航結論，沒有量測前不給續航保證。
 - **前後台**：`appLifecycle` 說的是 App 的狀態，不是螢幕狀態。`background` 期間仍可能有定位樣本（Android 前景服務／iOS 背景定位）。
 - **螢幕／鎖屏**：Android 可同時看 `screenInteractive` 與 `keyguardLocked`；`screenInteractive=false` 加 `keyguardLocked=true` 是最接近「鎖屏中」的可觀測組合，但仍是兩個 API 的狀態，不是鎖屏事件。iOS 只能看 `protectedDataAvailable`，且只能當弱訊號。
+- **`screenInteractive=true` 加 `keyguardLocked=true`（亮屏但鎖定）不一定會出現。** 同一台裝置實測：以密碼解鎖時這個中間狀態持續 3.886 秒並被寫成獨立一列；以生物辨識解鎖時亮屏與解鎖落在同一次廣播處理內，中間狀態完全沒有被觀測到。因此**不能**用它偵測「使用者正在看鎖定畫面」。
 - **定位服務**：`started`／`restarted` 搭配 `processRestartCount` 與 `resumeReason` 可看出系統是否重建過服務或程序。`failed` 會帶 `locationServiceDetail`。
 - **對齊定位紀錄**：用 `locationLogLastSequence` 找出 telemetry 當時定位紀錄寫到哪一筆，再回去看那段樣本的間隔。
 - `unknown`／`not available` 在畫面與資料中都保持原樣。看到 `unknown` 就是不知道，不要當成正常或 false。
@@ -221,7 +222,10 @@ dart run bin/inspect_telemetry.dart /absolute/path/to/exported.telemetry.ndjson
 - 序號零缺口、location-log 契約 0 error 0 warning、telemetry 0 bad lines
 - `locationLogLastSequence` 與定位紀錄的對齊 15／15 正確
 - 兩種格式分開匯出，分享文字各自正確
-- keyguard 時序可量測：該機關螢幕時 keyguard 鎖定延遲 0 ms；亮屏到解鎖之間有 3.886 秒「螢幕亮著且鎖定」的可區分狀態
+- keyguard 時序可量測：該機關螢幕時 keyguard 鎖定延遲 0 ms（兩次採集一致）。亮屏到解鎖之間的「螢幕亮著且鎖定」狀態**取決於解鎖方式**：密碼解鎖時為 3.886 秒並寫成獨立一列，生物辨識解鎖時完全沒有出現
+- `appLifecycle` 初始值修復後實測：第一列即為 `foreground`，一次 4 分鐘採集的 8 列全部有真實值、`app_lifecycle_unknown` 旗標 0 次
+- `recording_interrupted` 端對端實測：記錄中被終止後按停止，補寫的那一列 `locationLogLastSequence` 等於紀錄中實際最後一筆樣本序號，裝置欄位全部不可得，location-log 未被加入任何事件
+- 戶外 4 分鐘採集：245 筆樣本零缺口、間隔中位 1.000 秒、無 >5 秒空窗、水平精度中位 1.6 公尺、品質旗標 0 筆；鎖屏 73.7 秒期間 74 筆樣本未中斷
 - 程序在 append 完成後 59 ms 被終止，檔尾仍完整、無損壞行（**單次觀察**）
 - **SIGKILL 後 START_STICKY 前景服務在 5 秒內被系統重建**，寫出 `recording_resumed`（`reason: process_restart`、`resumedSequence`）與 telemetry 的 `restarted`／`process_restart`／`processRestartCount: 1`，同一 `recordingId` 與 `deviceBootId`
 
@@ -241,6 +245,8 @@ dart run bin/inspect_telemetry.dart /absolute/path/to/exported.telemetry.ndjson
 
 - **跨程序重啟的序號接續**：重建成功那次在被殺之前還沒有任何樣本（室內無 fix），所以 `resumedSequence` 是 0，沒有真正驗到序號從非零接續
 - 30 分鐘／2 小時長時間採集；telemetry 檔案大小與缺口分布
+- **heartbeat 從未被觀測到**：所有採集都短於 300 秒的門檻
+- 常駐通知在授予權限後是否實際可見（已確認 appop 允許且 `dumpsys notification` 有該 channel，但沒有畫面確認）
 - telemetry 自身的耗電（預期遠低於定位紀錄，但未量測）
 - 各廠牌鎖屏／AOD／抬手喚醒下 `isInteractive`／`isKeyguardLocked` 的值
 - 真正的低記憶體回收（目前只用 SIGKILL 與 `am crash` 模擬）
