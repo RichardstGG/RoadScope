@@ -223,7 +223,8 @@ dart run bin/inspect_telemetry.dart /absolute/path/to/exported.telemetry.ndjson
 - `locationLogLastSequence` 與定位紀錄的對齊 15／15 正確
 - 兩種格式分開匯出，分享文字各自正確
 - keyguard 時序可量測：該機關螢幕時 keyguard 鎖定延遲 0 ms（兩次採集一致）。亮屏到解鎖之間的「螢幕亮著且鎖定」狀態**取決於解鎖方式**：密碼解鎖時為 3.886 秒並寫成獨立一列，生物辨識解鎖時完全沒有出現
-- `appLifecycle` 初始值修復後實測：第一列即為 `foreground`，一次 4 分鐘採集的 8 列全部有真實值、`app_lifecycle_unknown` 旗標 0 次
+- `appLifecycle` 初始值修復後實測：第一列即為 `foreground`，一次 4 分鐘採集的 8 列全部有真實值、`app_lifecycle_unknown` 旗標 0 次；**畫面也確認顯示「前景」**
+- 授予 `POST_NOTIFICATIONS` 後**常駐通知在畫面上確實可見**（使用者目視確認）。程式碼仍未在執行期請求該權限，見 `docs/handoff-to-codex.md` H1
 - `recording_interrupted` 端對端實測：記錄中被終止後按停止，補寫的那一列 `locationLogLastSequence` 等於紀錄中實際最後一筆樣本序號，裝置欄位全部不可得，location-log 未被加入任何事件
 - 戶外 4 分鐘採集：245 筆樣本零缺口、間隔中位 1.000 秒、無 >5 秒空窗、水平精度中位 1.6 公尺、品質旗標 0 筆；鎖屏 73.7 秒期間 74 筆樣本未中斷
 - 程序在 append 完成後 59 ms 被終止，檔尾仍完整、無損壞行（**單次觀察**）
@@ -246,7 +247,6 @@ dart run bin/inspect_telemetry.dart /absolute/path/to/exported.telemetry.ndjson
 - **跨程序重啟的序號接續**：重建成功那次在被殺之前還沒有任何樣本（室內無 fix），所以 `resumedSequence` 是 0，沒有真正驗到序號從非零接續
 - 30 分鐘／2 小時長時間採集；telemetry 檔案大小與缺口分布
 - **heartbeat 從未被觀測到**：所有採集都短於 300 秒的門檻
-- 常駐通知在授予權限後是否實際可見（已確認 appop 允許且 `dumpsys notification` 有該 channel，但沒有畫面確認）
 - telemetry 自身的耗電（預期遠低於定位紀錄，但未量測）
 - 各廠牌鎖屏／AOD／抬手喚醒下 `isInteractive`／`isKeyguardLocked` 的值
 - 真正的低記憶體回收（目前只用 SIGKILL 與 `am crash` 模擬）

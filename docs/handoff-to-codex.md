@@ -29,7 +29,7 @@ dumpsys activity services …
   foregroundNoti=Notification(channel=roadscope_recording …)   ← 通知物件存在但沒被張貼
 ```
 
-手動 `pm grant` 之後，`dumpsys notification` 才數得到 `roadscope_recording` channel。
+手動 `pm grant` 之後，`dumpsys notification` 才數得到 `roadscope_recording` channel，使用者也**目視確認通知欄確實出現**常駐通知（2026-10-04 短測 A）。所以通知本身的實作是對的，缺的只有執行期權限請求。
 
 **影響**：
 
