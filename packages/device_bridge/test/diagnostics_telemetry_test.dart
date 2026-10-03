@@ -256,7 +256,7 @@ void main() {
       final interrupted = _row()
         ..['telemetrySequence'] = 1
         ..['trigger'] = diagnosticsTelemetryInterruptedTrigger
-        ..['reasons'] = <String>[]
+        ..['reasons'] = ['previous_segment_not_closed']
         ..['locationLogLastSequence'] = 41
         ..['locationServiceDetail'] =
             'previous process ended without a closing telemetry row'

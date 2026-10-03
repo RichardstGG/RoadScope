@@ -146,7 +146,14 @@ internal class TelemetryLogWriter(
         locationLogLastSequence: Long,
     ): Boolean {
         val previous = last
-        val changes = if (previous == null) listOf("initial_snapshot") else snapshot.changesFrom(previous)
+        // The interrupted marker deliberately claims nothing about the device,
+        // so a field-by-field diff against the last row would read as if the
+        // battery and screen had just become unavailable. Name the real reason.
+        val changes = when {
+            trigger == TRIGGER_RECORDING_INTERRUPTED -> listOf("previous_segment_not_closed")
+            previous == null -> listOf("initial_snapshot")
+            else -> snapshot.changesFrom(previous)
+        }
         if (trigger !in ALWAYS_WRITE) {
             if (trigger == TRIGGER_HEARTBEAT) {
                 val since = lastWriteMonoUs

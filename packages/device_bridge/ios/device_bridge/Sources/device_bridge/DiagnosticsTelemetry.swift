@@ -161,7 +161,15 @@ final class DiagnosticsTelemetryWriter {
   func record(_ trigger: Trigger, _ observation: TelemetryObservation,
               utc: Date?, monotonicUs: Int64?, deviceBootId: String?,
               locationLogLastSequence: Int) -> Bool {
-    let changes = last.map { observation.changes(from: $0) } ?? ["initial_snapshot"]
+    // The interrupted marker deliberately claims nothing about the device, so
+    // a field-by-field diff against the last row would read as if the battery
+    // and screen had just become unavailable. Name the real reason.
+    let changes: [String]
+    if trigger == .recordingInterrupted {
+      changes = ["previous_segment_not_closed"]
+    } else {
+      changes = last.map { observation.changes(from: $0) } ?? ["initial_snapshot"]
+    }
     if !DiagnosticsTelemetryWriter.alwaysWrite.contains(trigger) {
       if trigger == .heartbeat {
         if let since = lastWriteMonotonicUs, let now = monotonicUs,

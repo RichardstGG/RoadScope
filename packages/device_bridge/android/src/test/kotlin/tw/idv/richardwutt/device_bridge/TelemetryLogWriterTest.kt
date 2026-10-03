@@ -222,6 +222,11 @@ class TelemetryLogWriterTest {
         assertEquals(41, row.getInt("locationLogLastSequence"))
         assertEquals("previous process ended without a closing telemetry row",
             row.getString("locationServiceDetail"))
+        // Not a field-by-field diff: the values did not become unavailable,
+        // we simply never knew them.
+        assertEquals(listOf("previous_segment_not_closed"),
+            (0 until row.getJSONArray("reasons").length())
+                .map { row.getJSONArray("reasons").getString(it) })
         // Nothing is claimed about the device at the moment the segment died.
         for (key in listOf("batteryPercent", "batteryCharging", "powerSaveMode",
             "screenInteractive", "keyguardLocked")) {
