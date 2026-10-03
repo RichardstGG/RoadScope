@@ -65,8 +65,13 @@ public class DeviceBridgePlugin: NSObject, FlutterPlugin, CLLocationManagerDeleg
         result(FlutterError(code: "location_disabled", message: "Enable Location Services", details: nil))
       }
     case "stop":
+      // A segment this plugin instance never ran, while the stored state still
+      // says active, means the previous process died without closing its
+      // telemetry. Nothing else would ever mark that.
+      let interrupted = telemetry == nil && defaults.bool(forKey: "roadscope.active")
       telemetry?.stop(serviceState: "stopped")
       telemetry = nil
+      if interrupted { markInterrupted() }
       manager.stopUpdatingLocation()
       manager.allowsBackgroundLocationUpdates = false
       defaults.set(false, forKey: "roadscope.active")
@@ -90,6 +95,37 @@ public class DeviceBridgePlugin: NSObject, FlutterPlugin, CLLocationManagerDeleg
       result(read(telemetryURL))
     default: result(FlutterMethodNotImplemented)
     }
+  }
+
+  /// Writes the one telemetry row that says "the previous segment ended
+  /// without closing itself". The location log is not touched: it has no event
+  /// for this, and adding one would need a contract change.
+  private func markInterrupted() {
+    guard let url = telemetryURL, let id = recordingId else { return }
+    let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"
+    let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
+    let writer = DiagnosticsTelemetryWriter(url: url, recordingId: id,
+      sourceId: "ios-corelocation", appVersion: "\(version)+\(build)")
+    writer.recover()
+    var observation = TelemetryObservation()
+    observation.locationServiceDetail = "previous process ended without a closing telemetry row"
+    observation.processRestartCount = defaults.integer(forKey: "roadscope.restartCount")
+    writer.record(.recordingInterrupted, observation, utc: Date(),
+                  monotonicUs: MonotonicClock.continuousMicroseconds(),
+                  deviceBootId: defaults.string(forKey: "roadscope.bootId"),
+                  locationLogLastSequence: lastLoggedSequence())
+  }
+
+  /// Highest sample sequence actually present in the log, or -1. Read-only.
+  private func lastLoggedSequence() -> Int {
+    guard let url = logURL, let text = try? String(contentsOf: url, encoding: .utf8) else { return -1 }
+    var last = -1
+    for line in text.split(separator: "\n") {
+      guard let row = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+        row["recordType"] as? String == "sample", let seq = row["sequence"] as? Int else { continue }
+      last = max(last, seq)
+    }
+    return last
   }
 
   private func read(_ url: URL?) -> String {

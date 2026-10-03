@@ -56,7 +56,7 @@
 | `appVersion` | string | 例如 `0.0.2+2` |
 | `deviceBootId` | string\|null | 與 location-log 同一次 boot 判定；null 時帶 `device_boot_id_unavailable` |
 | `telemetrySequence` | int | 自 `0` 起算，成功落盤後才遞增 |
-| `trigger` | string | `recording_started`／`recording_resumed`／`recording_stopped`／`location_service`／`state_change`／`heartbeat` |
+| `trigger` | string | `recording_started`／`recording_resumed`／`recording_stopped`／`recording_interrupted`／`location_service`／`state_change`／`heartbeat`；見 §4.1 |
 | `reasons` | string[] | 與上一筆相比改變的欄位名；第一筆為 `["initial_snapshot"]` |
 | `occurredAtUtc` | string\|null | RFC3339，字面 `Z` 結尾。帶本地位移為非法 |
 | `occurredMonotonicUs` | int\|null | 含睡眠的單調時間，微秒 |
@@ -76,6 +76,18 @@
 | `resumeReason` | string\|null | `process_restart`／`crash`／`boot`；非恢復時為 null |
 | `recoveredTruncatedBytes` | int\|null | 修復末行時丟掉的位元組；null 表示沒有修復 |
 | `unavailable` | string[] | 見下 |
+
+### 4.1 `recording_interrupted`
+
+一段記錄**沒有自己收尾**時（程序被終止、崩潰、斷電），死掉的那個程序當然寫不出任何東西。後來的程序發現「偏好設定還寫著 recording，但這個程序並沒有在跑記錄器」時，補寫一列 `recording_interrupted`。
+
+讀這一列時必須注意三件事：
+
+1. **`occurredAtUtc`／`occurredMonotonicUs` 是「發現的時間」，不是「中斷的時間」。** 真正的結束時間被夾在前一列 telemetry 與 `locationLogLastSequence` 之間。
+2. **所有裝置可觀測欄位刻意留成不可得。** 補寫的程序不知道中斷當下電量、螢幕是什麼狀態，填入當時的值會讓人誤以為那是中斷時的紀錄。唯一的硬事實是 `locationLogLastSequence`——定位紀錄寫到哪一筆為止。
+3. **沒有這一列不代表正常結束。** 如果使用者從此沒再打開 App，就沒有任何程序會去補寫。突然結束而沒有標記仍然可能發生，判讀時要同時比對最後一筆的時間與你預期的結束時間。
+
+location-log **不會**有對應的事件：`contracts/location-log/v1` 沒有這個 `eventType`，要加必須走契約流程。中斷的標記只在 telemetry。
 
 ### null 與旗標
 
@@ -123,7 +135,7 @@ Android，鎖屏那一刻（為閱讀換行，實際為單行）：
 - `keyguardLocked` 來自 `KeyguardManager.isKeyguardLocked()`：這是 **keyguard 是否顯示**，不是精確的鎖屏事件，也不等於「使用者看到鎖定畫面」。欄位名刻意叫 `keyguardLocked` 而不是 `locked`。
 - `screenStateSource` 固定為 `android_power_manager_interactive_and_keyguard_locked`，把來源 API 寫進資料裡，讀的人不必猜。
 - 電量來自 `ACTION_BATTERY_CHANGED` 的 `EXTRA_LEVEL`／`EXTRA_SCALE`／`EXTRA_STATUS`／`EXTRA_PLUGGED`。`BATTERY_PLUGGED_DOCK` 是 API 33 才有的常數，為維持 minSdk 24 以數值 `8` 比對並在程式碼註明。
-- 前後台由 `Application.ActivityLifecycleCallbacks` 的 started activity 計數推得；**在看到第一個 activity 事件之前為 `unknown`**，例如系統重建服務而 UI 尚未建立時。這不是「背景」，所以不寫成 `background`。
+- 前後台由 `Application.ActivityLifecycleCallbacks` 的 started activity 計數推得。`ActivityLifecycleCallbacks` **不會重播**註冊之前就已經 started 的 activity，所以初始值由啟動服務的 Intent 的 `INITIAL_FOREGROUND` extra 帶入——從畫面按下開始時必然有 activity 且在前景（Android 14+ 的前景服務限制本來就要求如此）。**系統自行重建服務時沒有這個 extra，此時維持 `unknown`**，因為那時確實可能沒有任何 activity。`unknown` 不是「背景」，所以不寫成 `background`。
 - 省電模式來自 `PowerManager.isPowerSaveMode()`。
 - 沒有 iOS 的 protected-data 概念，`protectedDataAvailable` 恆為 null。
 
@@ -135,6 +147,7 @@ Android，鎖屏那一刻（為閱讀換行，實際為單行）：
 - 電量來自 `UIDevice` 的 battery monitoring（`isBatteryMonitoringEnabled = true`）。`batteryLevel` 為負值時寫 null 並帶旗標。`batteryState` 的 `.unknown` 寫 null，不寫 false。
 - iOS **不公開充電來源種類**，所以充電時 `batteryPowerSource` 為 `unknown`（帶 `battery_power_source_unknown`），而不是猜成 `usb`。未接電源才是 `none`。
 - 低耗電模式來自 `ProcessInfo.isLowPowerModeEnabled`。
+- 前後台直接讀 `UIApplication.shared.applicationState`，所以 iOS 不需要 Android 那個初始值 extra，第一列就有真實的 `appLifecycle`。
 - 時間使用 `mach_continuous_time()`＋`mach_timebase_info`，與 location-log v1 §3 同一個時間域；`mach_absolute_time()` 與 `ProcessInfo.systemUptime` 在睡眠期間不前進，兩者皆不使用。
 - heartbeat 是 run loop timer：**iOS 把程序暫停時不會觸發**。telemetry 的時間缺口因此是預期的，不能當成採集中斷的證據。
 
@@ -197,16 +210,46 @@ dart run bin/inspect_telemetry.dart /absolute/path/to/exported.telemetry.ndjson
 
 真機匯出的檔案只在本機檢查，不提交。
 
-## 9. 尚未驗證
+## 9. 真機驗證現況
 
-以下全部是 `untested`／`hardware tests` 待辦，目前只有 automated tests 與 static validation：
+裝置：Xiaomi 21081111RG（小米 11T Pro）、Android 14／SDK 34、MIUI `V816.0.15.0.UKWTWXM`。**只有這一台**，而 MIUI 是公認最激進的省電實作，下列結論不可推廣到其他品牌。
 
-- Android 真機的 `isInteractive`／`isKeyguardLocked` 在各廠牌鎖屏、AOD、抬手喚醒下的實際值。
-- Android 系統重建前景服務（`START_STICKY`）時 telemetry 的 `restarted`／`resumeReason` 是否如預期寫入。
-- iOS 鎖屏期間 `protectedDataAvailable` 的實際變化時機與緩衝期長度。
-- iOS 程序被系統暫停時 heartbeat 的實際停止與恢復行為。
-- telemetry 自身的耗電與寫入量（預期遠低於定位紀錄，但未量測）。
-- 長時間（30 分鐘／2 小時）採集後 telemetry 檔案大小與缺口分布。
-- 兩平台的「程序被強制終止後是否仍能恢復並續寫 telemetry」。
+### 已驗證（hardware tests）
 
-沒有上述真機證據前，不得用 telemetry 宣稱背景採集穩定或給出耗電數字。
+- 1 Hz 採樣、鎖屏期間不中斷（28.8 秒 29 筆，最大間隔 1.000 秒）
+- 序號零缺口、location-log 契約 0 error 0 warning、telemetry 0 bad lines
+- `locationLogLastSequence` 與定位紀錄的對齊 15／15 正確
+- 兩種格式分開匯出，分享文字各自正確
+- keyguard 時序可量測：該機關螢幕時 keyguard 鎖定延遲 0 ms；亮屏到解鎖之間有 3.886 秒「螢幕亮著且鎖定」的可區分狀態
+- 程序在 append 完成後 59 ms 被終止，檔尾仍完整、無損壞行（**單次觀察**）
+- **SIGKILL 後 START_STICKY 前景服務在 5 秒內被系統重建**，寫出 `recording_resumed`（`reason: process_restart`、`resumedSequence`）與 telemetry 的 `restarted`／`process_restart`／`processRestartCount: 1`，同一 `recordingId` 與 `deviceBootId`
+
+### 關鍵前提：MIUI 權限
+
+上面那一條**只在以下三項都開啟時成立**：
+
+| 項目 | 未開啟時的觀察 |
+|---|---|
+| MIUI 自啟動（`MIUIOP(10008)`） | 服務在 SIGKILL 與 `am crash` 後 **154 秒內完全沒有被重建**，ServiceRecord 直接消失 |
+| 電池最佳化白名單 | `dumpsys` 的 `tempAllowListReason` 會缺少 `SYSTEM_ALLOW_LISTED`，這是前景服務得以從背景啟動的豁免來源 |
+| `POST_NOTIFICATIONS` | 常駐通知被靜默擋掉（appop `ignore`），服務仍在跑但使用者看不到 |
+
+三項是一起改的，**無法分辨哪一項是決定性的**。要分辨必須逐項開關重測。產品層面的結論是：這些權限必須由 App 引導使用者開啟，否則小米機上程序一死就不會恢復。
+
+### 尚未驗證（`untested`／待 `hardware tests`）
+
+- **跨程序重啟的序號接續**：重建成功那次在被殺之前還沒有任何樣本（室內無 fix），所以 `resumedSequence` 是 0，沒有真正驗到序號從非零接續
+- 30 分鐘／2 小時長時間採集；telemetry 檔案大小與缺口分布
+- telemetry 自身的耗電（預期遠低於定位紀錄，但未量測）
+- 各廠牌鎖屏／AOD／抬手喚醒下 `isInteractive`／`isKeyguardLocked` 的值
+- 真正的低記憶體回收（目前只用 SIGKILL 與 `am crash` 模擬）
+- 第二台非小米 Android 真機
+- **iOS 全部**：只有 CI 的 `flutter build ios --no-codesign` 通過（編譯層級）與 static validation，沒有任何執行期或真機證據
+- iOS 鎖屏期間 `protectedDataAvailable` 的實際變化時機與緩衝期
+- iOS 程序被暫停時 heartbeat 的實際停止與恢復行為
+
+沒有上述證據前，不得用 telemetry 宣稱背景採集穩定或給出耗電數字。
+
+### 觀測工具的限制
+
+MIUI 幾乎關閉了 AMS 的程序／服務生命週期日誌（一次 160 秒的擷取裡 26799 行只有 8 行 `ActivityManager`，全部無關）。因此在這台機器上**看不到** `Scheduling restart of crashed service` 或 `ForegroundServiceStartNotAllowedException`，「logcat 沒有重啟訊息」不能當成「系統決定不重啟」的證據。可靠的觀測方式是輪詢 `dumpsys activity services <pkg>` 的 `isForeground` 與 `pidof`。

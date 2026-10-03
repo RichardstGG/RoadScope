@@ -20,6 +20,16 @@ String _code(String source) => source
     })
     .join('\n');
 
+/// The body of one function, from its declaration to the next declaration at
+/// the same level. Enough for a static check that a function does not reach
+/// for something it must not touch.
+String _body(String source, String declaration, String nextDeclaration) {
+  final start = source.indexOf(declaration);
+  if (start < 0) return '';
+  final end = source.indexOf(nextDeclaration, start + declaration.length);
+  return source.substring(start, end < 0 ? source.length : end);
+}
+
 void main() {
   final kotlin = File(
     'android/src/main/kotlin/tw/idv/richardwutt/device_bridge/TelemetryLogWriter.kt',
@@ -122,6 +132,62 @@ void main() {
     );
     expect(monitor, contains('power?.isInteractive'));
     expect(monitor, contains('keyguard?.isKeyguardLocked'));
+  });
+
+  test('the opening row can know whether the app was in the foreground', () {
+    final monitor = File(
+      'android/src/main/kotlin/tw/idv/richardwutt/device_bridge/DeviceStateMonitor.kt',
+    ).readAsStringSync();
+    final plugin = File(
+      'android/src/main/kotlin/tw/idv/richardwutt/device_bridge/DeviceBridgePlugin.kt',
+    ).readAsStringSync();
+    final service = File(
+      'android/src/main/kotlin/tw/idv/richardwutt/device_bridge/LocationRecorderService.kt',
+    ).readAsStringSync();
+    // ActivityLifecycleCallbacks never replays the already-started activity,
+    // so the state has to be handed in from the side that knows it.
+    expect(monitor, contains('initialForeground != null'));
+    expect(monitor, contains('sawActivity = true'));
+    expect(plugin, contains('EXTRA_INITIAL_FOREGROUND'));
+    expect(service, contains('EXTRA_INITIAL_FOREGROUND'));
+    // A system-initiated restart has no activity to report, so it stays unknown.
+    expect(service, contains('} else null'));
+    // iOS reads the state directly and needs no seed.
+    expect(swift, contains('UIApplication.shared.applicationState'));
+  });
+
+  test('an interrupted segment is markable on both platforms', () {
+    final service = File(
+      'android/src/main/kotlin/tw/idv/richardwutt/device_bridge/LocationRecorderService.kt',
+    ).readAsStringSync();
+    for (final source in [kotlin, swift]) {
+      expect(source, contains('recording_interrupted'));
+    }
+    expect(service, contains('markInterrupted()'));
+    expect(plugin, contains('markInterrupted()'));
+    // The marker reports how far the location log got, read-only.
+    expect(service, contains('lastLoggedSequence'));
+    expect(plugin, contains('lastLoggedSequence'));
+    // Each side names the trigger through its own writer's constant, so the
+    // literal only ever exists in one place per platform.
+    expect(_code(service), contains('TRIGGER_RECORDING_INTERRUPTED'));
+    expect(_code(plugin), contains('.recordingInterrupted'));
+    // The marker must not put an event into the location log: v1 has no such
+    // eventType, and adding one would need a contract change. The iOS plugin
+    // is also the location-log writer, so this is checked per function body.
+    for (final body in [
+      _body(
+        _code(service),
+        'private fun markInterrupted()',
+        '    private fun ',
+      ),
+      _body(_code(plugin), 'private func markInterrupted()', '  private func '),
+    ]) {
+      expect(body, isNot(contains('eventType')));
+      expect(body, isNot(contains('event(')));
+      // It does report how far the location log got.
+      expect(body, contains('lastLoggedSequence'));
+    }
   });
 
   test('both writers only advance their sequence after a durable append', () {

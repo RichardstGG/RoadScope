@@ -20,10 +20,21 @@ const _knownTriggers = {
   'recording_started',
   'recording_resumed',
   'recording_stopped',
+  diagnosticsTelemetryInterruptedTrigger,
   'location_service',
   'state_change',
   'heartbeat',
 };
+
+/// A segment that ended without writing its own closing row, noticed
+/// afterwards by a later process.
+///
+/// Its timestamps are **when the interruption was noticed**, not when it
+/// happened; the real end is bounded by [DiagnosticsTelemetryRecord
+/// .locationLogLastSequence] and the previous row's time. Its device
+/// observables are deliberately unavailable, because the writer does not know
+/// what the device looked like when the segment died.
+const diagnosticsTelemetryInterruptedTrigger = 'recording_interrupted';
 
 const _knownLifecycles = {'foreground', 'inactive', 'background', 'unknown'};
 
@@ -261,6 +272,13 @@ class TelemetryReadReport {
 
   DiagnosticsTelemetryRecord? get latest =>
       records.isEmpty ? null : records.last;
+
+  /// Whether the last segment in this file ended without closing itself —
+  /// a process kill, a crash, or a power cut. `false` only means no such row
+  /// was written: a segment whose app was never opened again cannot be marked
+  /// at all, so an abrupt end with no marker is still possible.
+  bool get lastSegmentInterrupted =>
+      latest?.trigger == diagnosticsTelemetryInterruptedTrigger;
 }
 
 /// Parses a whole telemetry file. Safe to call repeatedly on a growing file.

@@ -251,6 +251,59 @@ void main() {
       expect(report.records.single.unavailable, contains('future_flag'));
     });
 
+    test('an interrupted segment is readable and flagged', () {
+      final started = _row();
+      final interrupted = _row()
+        ..['telemetrySequence'] = 1
+        ..['trigger'] = diagnosticsTelemetryInterruptedTrigger
+        ..['reasons'] = <String>[]
+        ..['locationLogLastSequence'] = 41
+        ..['locationServiceDetail'] =
+            'previous process ended without a closing telemetry row'
+        // The writer claims nothing about the device at the moment of death.
+        ..['batteryPercent'] = null
+        ..['batteryCharging'] = null
+        ..['batteryPowerSource'] = 'unknown'
+        ..['powerSaveMode'] = null
+        ..['screenInteractive'] = null
+        ..['keyguardLocked'] = null
+        ..['appLifecycle'] = 'unknown'
+        ..['locationServiceState'] = 'unknown'
+        ..['unavailable'] = [
+          'protected_data_state_unavailable',
+          'battery_percent_unavailable',
+          'battery_charging_unavailable',
+          'battery_power_source_unknown',
+          'power_save_mode_unavailable',
+          'screen_interactive_unavailable',
+          'keyguard_state_unavailable',
+          'app_lifecycle_unknown',
+          'location_service_state_unknown',
+        ];
+      final report = parseDiagnosticsTelemetry(
+        '${_line(started)}${_line(interrupted)}',
+      );
+      expect(report.ok, isTrue, reason: _codes(report).toString());
+      expect(report.lastSegmentInterrupted, isTrue);
+      final last = report.latest!;
+      expect(last.trigger, 'recording_interrupted');
+      expect(last.locationLogLastSequence, 41);
+      expect(last.batteryPercent, isNull);
+      expect(last.screenInteractive, isNull);
+      expect(last.appLifecycle, 'unknown');
+      expect(last.locationServiceState, 'unknown');
+    });
+
+    test('a normally closed file is not reported as interrupted', () {
+      final report = parseDiagnosticsTelemetry(
+        _fixture('android-state-changes.ndjson'),
+      );
+      expect(report.latest!.trigger, 'recording_stopped');
+      expect(report.lastSegmentInterrupted, isFalse);
+      // An empty file cannot claim anything either way.
+      expect(parseDiagnosticsTelemetry('').lastSegmentInterrupted, isFalse);
+    });
+
     test('reading the same file twice gives the same answer', () {
       final text = _fixture('android-state-changes.ndjson');
       final first = parseDiagnosticsTelemetry(text);

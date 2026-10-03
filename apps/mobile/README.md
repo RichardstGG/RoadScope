@@ -8,7 +8,9 @@ Flutter 3.47.3 診斷 App，版本 `0.0.2+2`，識別碼 `tw.idv.richardwutt.roa
 
 畫面下半部顯示最近一筆**診斷 telemetry**：電量與充電狀態、App 前後台、可觀測的螢幕／keyguard 狀態、定位服務狀態、telemetry 時間，以及 telemetry 檔是否可匯出。不可得的值一律顯示「無法取得（not available）」，平台回報為未知的列舉顯示「未知（unknown）」，不會把未知當成正常或 `false`。Android 的螢幕欄位來自 `PowerManager.isInteractive()` 與 `KeyguardManager.isKeyguardLocked()`；iOS 沒有公開可靠的鎖屏 API，那兩個欄位恆為空值，只保留 `protectedDataAvailable` 這個弱訊號。telemetry 是事後判讀用的診斷資訊，**不證明背景採集穩定**，程序被系統暫停期間也不會有紀錄。
 
-telemetry 寫在獨立檔案（Android `<filesDir>/diagnostics/<recordingId>.telemetry.ndjson`、iOS `Documents/diagnostics/<recordingId>.telemetry.ndjson`），有自己的 `telemetryVersion` 與序號空間，不含位置資料，也沒有動到 `location-log` v1 的任何欄位、`recordType`、`eventType` 或序號規則。欄位表、平台限制、判讀方式與尚未驗證的項目見 [`docs/diagnostics-telemetry.md`](../../docs/diagnostics-telemetry.md)。要把 telemetry 欄位放進正式定位紀錄，仍須先與契約擁有者協調。
+若上一段記錄沒有自己收尾（程序被終止、崩潰、斷電），下次停止記錄時會補寫一列 `recording_interrupted`，畫面也會紅字標明「上一段記錄沒有自己收尾」並指出定位紀錄寫到哪一個序號。該列的時間是**發現**中斷的時間，不是中斷發生的時間，裝置狀態欄位刻意留成不可得。反之，**沒有這個標記不代表正常結束**——若從此沒再打開 App 就沒人補寫，所以判讀時仍要比對最後一筆的時間與你預期的結束時間。
+
+telemetry 寫在獨立檔案（Android `<filesDir>/diagnostics/<recordingId>.telemetry.ndjson`、iOS `Documents/diagnostics/<recordingId>.telemetry.ndjson`），有自己的 `telemetryVersion` 與序號空間，不含位置資料，也沒有動到 `location-log` v1 的任何欄位、`recordType`、`eventType` 或序號規則。欄位表、平台限制、判讀方式與真機驗證現況見 [`docs/diagnostics-telemetry.md`](../../docs/diagnostics-telemetry.md)。要把 telemetry 欄位放進正式定位紀錄，仍須先與契約擁有者協調。
 
 匯出分成兩個按鈕，都需先停止記錄：「匯出 location-log v1」（含精確座標）與「匯出 diagnostics telemetry」（只含裝置與 App 狀態）。兩者分享文字各自標明格式，不混在同一個檔案或同一次分享裡。
 
@@ -25,7 +27,9 @@ flutter build ios --no-codesign  # macOS + Xcode
 flutter run -d <device-id>
 ```
 
-首次啟動須授予精確定位；iOS 測試背景採集時選擇允許持續定位。Android 會顯示常駐的記錄通知。iOS 簽署與實機安裝須在 Mac 上設定開發團隊。匯出的 NDJSON 有精確座標，請只主動提供給可信的測試協作者。
+首次啟動須授予精確定位**與通知**；目前程式碼不會在執行期請求 `POST_NOTIFICATIONS`，未授予時前景服務照跑但常駐通知會被靜默擋掉。iOS 測試背景採集時選擇允許持續定位。
+
+**小米／MIUI 必讀**：實測在 MIUI 14（Android 14）上，若未開啟「自啟動」並把省電策略設為無限制，程序被終止後前景服務**不會被系統重建**，採集就此結束（實測 154 秒內零重建）。三項都開啟後，SIGKILL 後 5 秒內服務被重建並正確續錄。長時間測試前請先確認：設定 → 應用設定 → 應用管理 → RoadScope →「自啟動」開啟、「省電策略」設為無限制、通知權限開啟。重裝請用 `adb install -r`，**解除安裝會清掉這些設定與手機上的紀錄檔**。iOS 簽署與實機安裝須在 Mac 上設定開發團隊。匯出的 NDJSON 有精確座標，請只主動提供給可信的測試協作者。
 
 ## 真機測試包
 

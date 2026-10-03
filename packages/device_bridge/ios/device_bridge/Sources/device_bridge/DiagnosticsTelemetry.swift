@@ -87,6 +87,13 @@ final class DiagnosticsTelemetryWriter {
     case recordingStarted = "recording_started"
     case recordingResumed = "recording_resumed"
     case recordingStopped = "recording_stopped"
+    /// A segment that ended without writing its own closing row, noticed
+    /// afterwards by a later process. Its timestamps are **when the
+    /// interruption was noticed**, not when it happened; the actual end is
+    /// bounded by `locationLogLastSequence` and the previous row's time. The
+    /// device observables stay unavailable on purpose, because we do not know
+    /// what the device looked like when the segment died.
+    case recordingInterrupted = "recording_interrupted"
     case locationService = "location_service"
     case stateChange = "state_change"
     case heartbeat
@@ -113,7 +120,8 @@ final class DiagnosticsTelemetryWriter {
   }
 
   private static let alwaysWrite: Set<Trigger> = [
-    .recordingStarted, .recordingResumed, .recordingStopped, .locationService,
+    .recordingStarted, .recordingResumed, .recordingStopped, .recordingInterrupted,
+    .locationService,
   ]
 
   /// Repairs an incomplete tail and restores the sequence and last-written

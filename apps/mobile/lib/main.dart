@@ -222,7 +222,18 @@ class _RecorderScreenState extends State<RecorderScreen>
               : '${record.occurredMonotonicUs} µs',
         ),
         _detail('對應的最後定位序號', '${record.locationLogLastSequence}'),
-        _detail('觸發原因', record.trigger),
+        _detail(
+          '觸發原因',
+          _enumLabel(record.trigger, const {
+            'recording_started': '開始記錄',
+            'recording_resumed': '續錄',
+            'recording_stopped': '停止記錄',
+            'recording_interrupted': '上一段非正常結束',
+            'location_service': '定位服務變化',
+            'state_change': '狀態改變',
+            'heartbeat': '定期回報',
+          }),
+        ),
         _detail(
           'telemetry 筆數／壞行',
           '${report!.records.length}／${report.badLines}',
@@ -231,6 +242,14 @@ class _RecorderScreenState extends State<RecorderScreen>
           _detail('無法取得的欄位', record.unavailable.join('、')),
       ],
       _detail('telemetry 可匯出', exportable ? '可匯出' : '目前不可匯出'),
+      // An abrupt end with no marker is still possible, so this warning only
+      // fires when the writer managed to record one.
+      if (report?.lastSegmentInterrupted ?? false)
+        Text(
+          '上一段記錄沒有自己收尾（程序被終止、崩潰或斷電）。'
+          '定位紀錄寫到序號 ${record!.locationLogLastSequence} 為止。',
+          style: TextStyle(color: Theme.of(context).colorScheme.error),
+        ),
       const Text('telemetry 是事後判讀用的診斷資訊，不證明背景採集穩定。'),
     ];
   }

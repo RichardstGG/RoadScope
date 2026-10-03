@@ -10,6 +10,8 @@ iOS 接收時間與 anchor 使用 `mach_continuous_time()`，測量單調時間�
 
 除定位紀錄外，本 plugin 另寫一份**診斷 telemetry**：電量、充電、可觀測的螢幕／keyguard 狀態、App 前後台、定位服務啟停與恢復。它是獨立檔案（`<filesDir>`／`Documents` 下的 `diagnostics/<recordingId>.telemetry.ndjson`）、獨立的 `telemetryVersion` 與獨立的 `telemetrySequence`，不含位置資料，也不改動 `location-log` v1 的欄位、`recordType`、`eventType` 或序號規則；只以唯讀的 `locationLogLastSequence` 對齊兩份檔案。寫入時機是狀態改變加上 300 秒 heartbeat，狀態沒變不寫檔。`status` 回傳 `telemetryPath`，`readTelemetry` 讀取該檔，Dart 端以 `parseDiagnosticsTelemetry` 解析。欄位表與平台限制見 [`docs/diagnostics-telemetry.md`](../../docs/diagnostics-telemetry.md)。telemetry 是診斷資訊，不構成背景採集穩定的證明。
 
+`appLifecycle` 的初始值由啟動服務的 Intent extra 帶入（從畫面按下開始時必然在前景）；系統自行重建服務時沒有該 extra，維持 `unknown`。iOS 直接讀 `UIApplication.shared.applicationState`，不需要這個 extra。一段記錄沒有自己收尾時，下次停止會補寫 `recording_interrupted`，只保留 `locationLogLastSequence` 這個硬事實，不假裝知道中斷當下的裝置狀態；location-log 不寫對應事件，因為 v1 沒有這個 `eventType`。
+
 iOS 沒有公開可靠的鎖屏 API，因此 `screenInteractive` 與 `keyguardLocked` 在 iOS 恆為 null 並帶旗標，背景狀態絕不改名為 locked；Android 則明寫兩個來源 API 的名稱。兩端的 telemetry 時間與定位紀錄共用同一個含睡眠的單調時間域（Android `elapsedRealtimeNanos`、iOS `mach_continuous_time`）。
 
 Android 原生測試命令：在 `apps/mobile/android` 執行 `./gradlew :device_bridge:testDebugUnitTest`。測試會產生合成 NDJSON 到 `apps/mobile/build/device_bridge/native-log-fixtures/`（定位紀錄，以共同 Node 驗證器檢查）與 `native-telemetry-fixtures/`（telemetry，以 `dart run bin/inspect_telemetry.dart --strict` 檢查）。iOS 無法在 Linux 執行，改以 `test/native_telemetry_alignment_test.dart` 做 static validation：Kotlin、Swift 與 Dart 三端的 telemetry 欄位集合必須一致，且不得出現座標欄位或 location-log 的記錄識別欄位。這些只驗證檔案寫入、恢復與格式一致性，未覆蓋作業系統的背景排程、耗電及實際定位品質。

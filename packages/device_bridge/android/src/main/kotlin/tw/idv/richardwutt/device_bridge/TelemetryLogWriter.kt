@@ -37,11 +37,24 @@ internal class TelemetryLogWriter(
         const val TRIGGER_STATE_CHANGE = "state_change"
         const val TRIGGER_HEARTBEAT = "heartbeat"
 
+        /**
+         * A segment that ended without writing its own closing row, noticed
+         * afterwards by a later process.
+         *
+         * Its `occurredAtUtc`/`occurredMonotonicUs` are **when the
+         * interruption was noticed**, not when it happened; the actual end is
+         * bounded by `locationLogLastSequence` and the previous row's time.
+         * The device observables are left unavailable on purpose, because we
+         * do not know what the device looked like when the segment died.
+         */
+        const val TRIGGER_RECORDING_INTERRUPTED = "recording_interrupted"
+
         /** Triggers that describe a lifecycle moment, so an unchanged state still matters. */
         private val ALWAYS_WRITE = setOf(
             TRIGGER_RECORDING_STARTED,
             TRIGGER_RECORDING_STOPPED,
             TRIGGER_RECORDING_RESUMED,
+            TRIGGER_RECORDING_INTERRUPTED,
             TRIGGER_LOCATION_SERVICE,
         )
 

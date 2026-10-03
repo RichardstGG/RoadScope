@@ -26,6 +26,13 @@ import java.util.UUID
 class LocationRecorderService : Service(), LocationListener {
     companion object {
         const val ACTION_STOP = "tw.idv.richardwutt.device_bridge.STOP"
+
+        /**
+         * Whether the app was in the foreground when the recorder was asked to
+         * start. Absent on a system-initiated sticky restart, where it is
+         * genuinely unknown.
+         */
+        const val EXTRA_INITIAL_FOREGROUND = "tw.idv.richardwutt.device_bridge.INITIAL_FOREGROUND"
         private const val PREFS = "roadscope_location_recorder"
         private const val CHANNEL_ID = "roadscope_recording"
         private const val NOTIFICATION_ID = 8042
@@ -90,6 +97,7 @@ class LocationRecorderService : Service(), LocationListener {
     private lateinit var writer: LocationLogWriter
     private lateinit var handler: Handler
     private var telemetry: DeviceStateMonitor? = null
+    @Volatile private var initialForeground: Boolean? = null
     @Volatile private var destroyed = false
     @Volatile private var active = false
     @Volatile private var lastMeasurementMonoUs = -1L
@@ -109,8 +117,14 @@ class LocationRecorderService : Service(), LocationListener {
             handler.post {
                 if (destroyed) return@post
                 active = false
+                // A segment this process never ran, but prefs still says
+                // recording, means the previous process died without closing
+                // its telemetry. Nothing else would ever mark that.
+                val interrupted =
+                    telemetry == null && prefs(this).getString("state", null) == "recording"
                 telemetry?.stop("stopped")
                 telemetry = null
+                if (interrupted) markInterrupted()
                 prefs(this).edit().putString("state", "idle").remove("error").commit()
                 locationManager.removeUpdates(this)
                 stopForeground(STOP_FOREGROUND_REMOVE)
@@ -134,6 +148,9 @@ class LocationRecorderService : Service(), LocationListener {
         if (Build.VERSION.SDK_INT >= 29) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
         } else startForeground(NOTIFICATION_ID, notification)
+        initialForeground = if (intent?.hasExtra(EXTRA_INITIAL_FOREGROUND) == true) {
+            intent.getBooleanExtra(EXTRA_INITIAL_FOREGROUND, false)
+        } else null
         handler.post { startRecording() }
         return START_STICKY
     }
@@ -197,10 +214,67 @@ class LocationRecorderService : Service(), LocationListener {
                 serviceState = if (resume) "restarted" else "started",
                 restartCount = restarts,
                 resume = if (!resume) null else if (writer.bootResumed) "boot" else "process_restart",
+                initialForeground = initialForeground,
             )
         } catch (_: Exception) {
             telemetry = null
         }
+    }
+
+    /**
+     * Writes the one telemetry row that says "the previous segment ended
+     * without closing itself".
+     *
+     * The device observables stay unavailable on purpose: this process has no
+     * idea what the battery or the screen looked like when the segment died,
+     * and filling in current values would read as if they were recorded then.
+     * `locationLogLastSequence` is read from the log, so a reader can see
+     * exactly how far collection got. The location log itself is not touched —
+     * `contracts/location-log/v1` has no event for this, and adding one would
+     * need a contract change.
+     */
+    private fun markInterrupted() {
+        val p = prefs(this)
+        val id = p.getString("latestId", null) ?: return
+        try {
+            val info = packageManager.getPackageInfo(packageName, 0)
+            @Suppress("DEPRECATION")
+            val version = "${info.versionName ?: "unknown"}+${info.versionCode}"
+            val interruptedWriter = TelemetryLogWriter(
+                File(File(filesDir, "diagnostics"), "$id.telemetry.ndjson"),
+                id, "android-gps", version)
+            interruptedWriter.recover()
+            interruptedWriter.record(
+                TelemetryLogWriter.TRIGGER_RECORDING_INTERRUPTED,
+                TelemetrySnapshot(
+                    locationServiceDetail = "previous process ended without a closing telemetry row",
+                    processRestartCount = p.getInt("restartCount", 0),
+                ),
+                System.currentTimeMillis(),
+                SystemClock.elapsedRealtimeNanos() / 1000,
+                p.getString("bootId", null),
+                lastLoggedSequence(id),
+            )
+        } catch (_: Exception) {
+            // Diagnostics must never block the stop the user asked for.
+        }
+    }
+
+    /** Highest sample sequence actually present in the log, or -1. Read-only. */
+    private fun lastLoggedSequence(id: String): Long {
+        val file = File(File(filesDir, "recordings"), "$id.ndjson")
+        if (!file.exists()) return -1L
+        var last = -1L
+        file.forEachLine { line ->
+            if (line.isBlank()) return@forEachLine
+            try {
+                val row = JSONObject(line)
+                if (row.optString("recordType") == "sample") last = row.optLong("sequence", last)
+            } catch (_: Exception) {
+                // A damaged tail is expected; keep the last good sequence.
+            }
+        }
+        return last
     }
 
     private fun persistClock() {

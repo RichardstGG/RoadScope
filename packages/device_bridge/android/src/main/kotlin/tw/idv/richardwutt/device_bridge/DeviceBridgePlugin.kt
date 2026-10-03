@@ -80,9 +80,12 @@ class DeviceBridgePlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Activ
 
     private fun launch(result: MethodChannel.Result) {
         try {
-            // Must be invoked while the activity is foreground on Android 14+.
+            // Must be invoked while the activity is foreground on Android 14+,
+            // which is also why an attached activity means the app is
+            // foreground right now; the service cannot work that out later.
             ContextCompat.startForegroundService(context,
-                Intent(context, LocationRecorderService::class.java))
+                Intent(context, LocationRecorderService::class.java).putExtra(
+                    LocationRecorderService.EXTRA_INITIAL_FOREGROUND, activity != null))
             result.success(null)
         } catch (error: Exception) {
             result.error("start_failed", error.message, null)
