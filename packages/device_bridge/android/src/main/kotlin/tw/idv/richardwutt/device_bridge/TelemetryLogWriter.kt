@@ -34,6 +34,7 @@ internal class TelemetryLogWriter(
         const val TRIGGER_RECORDING_STOPPED = "recording_stopped"
         const val TRIGGER_RECORDING_RESUMED = "recording_resumed"
         const val TRIGGER_LOCATION_SERVICE = "location_service"
+        const val TRIGGER_TASK_REMOVED = "task_removed"
         const val TRIGGER_STATE_CHANGE = "state_change"
         const val TRIGGER_HEARTBEAT = "heartbeat"
 
@@ -56,6 +57,7 @@ internal class TelemetryLogWriter(
             TRIGGER_RECORDING_RESUMED,
             TRIGGER_RECORDING_INTERRUPTED,
             TRIGGER_LOCATION_SERVICE,
+            TRIGGER_TASK_REMOVED,
         )
 
         internal fun snapshotFromJson(row: JSONObject) = TelemetrySnapshot(

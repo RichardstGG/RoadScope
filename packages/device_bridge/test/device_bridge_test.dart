@@ -22,6 +22,11 @@ void main() {
             'recordingId': 'rec-1',
             'logPath': '/tmp/rec-1.ndjson',
             'sampleAgeMs': 1250,
+            'platform': 'android',
+            'manufacturer': 'Xiaomi',
+            'notificationPermissionGranted': false,
+            'batteryOptimizationIgnored': true,
+            'vendorBackgroundSetupRecommended': true,
           },
           'readLog' => '{"sample":1}\n',
           _ => null,
@@ -33,9 +38,26 @@ void main() {
       expect(status.isRecording, isTrue);
       expect(status.recordingId, 'rec-1');
       expect(status.sampleAgeMs, 1250.0);
+      expect(status.platform, 'android');
+      expect(status.manufacturer, 'Xiaomi');
+      expect(status.notificationPermissionGranted, isFalse);
+      expect(status.batteryOptimizationIgnored, isTrue);
+      expect(status.vendorBackgroundSetupRecommended, isTrue);
       expect(await bridge.readLog(), '{"sample":1}\n');
       await bridge.stop();
       expect(calls, ['start', 'status', 'readLog', 'stop']);
     },
   );
+
+  test('background settings methods use their native channel calls', () async {
+    final calls = <String>[];
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      calls.add(call.method);
+      return null;
+    });
+    const bridge = DeviceBridge();
+    await bridge.openAppSettings();
+    await bridge.openBatteryOptimizationSettings();
+    expect(calls, ['openAppSettings', 'openBatteryOptimizationSettings']);
+  });
 }

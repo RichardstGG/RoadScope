@@ -23,8 +23,21 @@ class DeviceBridge {
       telemetryPath: raw['telemetryPath'] as String?,
       error: raw['error'] as String?,
       sampleAgeMs: (raw['sampleAgeMs'] as num?)?.toDouble(),
+      platform: raw['platform'] as String?,
+      manufacturer: raw['manufacturer'] as String?,
+      notificationPermissionGranted:
+          raw['notificationPermissionGranted'] as bool?,
+      batteryOptimizationIgnored: raw['batteryOptimizationIgnored'] as bool?,
+      vendorBackgroundSetupRecommended:
+          raw['vendorBackgroundSetupRecommended'] as bool? ?? false,
     );
   }
+
+  Future<void> openAppSettings() async =>
+      _channel.invokeMethod<void>('openAppSettings');
+
+  Future<void> openBatteryOptimizationSettings() async =>
+      _channel.invokeMethod<void>('openBatteryOptimizationSettings');
 
   /// Reads the `contracts/location-log/v1` file.
   Future<String> readLog() async =>
@@ -48,6 +61,11 @@ class RecorderStatus {
     this.telemetryPath,
     this.error,
     this.sampleAgeMs,
+    this.platform,
+    this.manufacturer,
+    this.notificationPermissionGranted,
+    this.batteryOptimizationIgnored,
+    this.vendorBackgroundSetupRecommended = false,
   });
 
   final String state;
@@ -63,6 +81,11 @@ class RecorderStatus {
 
   final String? error;
   final double? sampleAgeMs;
+  final String? platform;
+  final String? manufacturer;
+  final bool? notificationPermissionGranted;
+  final bool? batteryOptimizationIgnored;
+  final bool vendorBackgroundSetupRecommended;
 
   bool get isRecording => state == 'recording';
 }

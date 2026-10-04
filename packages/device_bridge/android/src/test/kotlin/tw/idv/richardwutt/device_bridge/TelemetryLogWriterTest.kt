@@ -148,6 +148,19 @@ class TelemetryLogWriterTest {
         export(file, "heartbeat")
     }
 
+    @Test fun `task removal is written even when observable state is unchanged`() {
+        val file = File(directory, "telemetry.ndjson")
+        val writer = writer(file)
+        writer.record(TelemetryLogWriter.TRIGGER_RECORDING_STARTED,
+            snapshot(), utc, mono, "boot-a", -1L)
+        assertTrue(writer.record(TelemetryLogWriter.TRIGGER_TASK_REMOVED,
+            snapshot(lifecycle = "background"), utc + 1000, mono + 1_000_000, "boot-a", 4L))
+        assertTrue(writer.record(TelemetryLogWriter.TRIGGER_TASK_REMOVED,
+            snapshot(lifecycle = "background"), utc + 2000, mono + 2_000_000, "boot-a", 5L))
+        assertEquals(listOf("recording_started", "task_removed", "task_removed"),
+            rows(file).map { it.getString("trigger") })
+    }
+
     @Test fun `incomplete tail is repaired and the restored state survives a restart`() {
         val file = File(directory, "telemetry.ndjson")
         val first = writer(file)

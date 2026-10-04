@@ -147,6 +147,11 @@ internal class DeviceStateMonitor(
         if (running) record(TelemetryLogWriter.TRIGGER_LOCATION_SERVICE)
     }
 
+    /** Records that Android removed the app task while the service remained. */
+    fun noteTaskRemoved() {
+        if (running) record(TelemetryLogWriter.TRIGGER_TASK_REMOVED)
+    }
+
     fun snapshot() = TelemetrySnapshot(
         batteryPercent = batteryPercent,
         batteryCharging = batteryCharging,

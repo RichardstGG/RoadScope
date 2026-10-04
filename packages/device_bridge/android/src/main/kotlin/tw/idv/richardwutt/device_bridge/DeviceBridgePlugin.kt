@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Handler
 import android.os.Looper
+import android.os.Build
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
@@ -14,6 +15,18 @@ import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.PluginRegistry
+
+internal fun requiredRecordingPermissions(
+    sdkInt: Int,
+    fineLocationGranted: Boolean,
+    notificationGranted: Boolean,
+): List<String> = buildList {
+    if (!fineLocationGranted) {
+        add(Manifest.permission.ACCESS_FINE_LOCATION)
+        add(Manifest.permission.ACCESS_COARSE_LOCATION)
+    }
+    if (sdkInt >= 33 && !notificationGranted) add(Manifest.permission.POST_NOTIFICATIONS)
+}
 
 class DeviceBridgePlugin : FlutterPlugin, MethodChannel.MethodCallHandler, ActivityAware,
     PluginRegistry.RequestPermissionsResultListener {
@@ -44,7 +57,22 @@ class DeviceBridgePlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Activ
             "readTelemetry" -> readFile(result) { done ->
                 LocationRecorderService.readTelemetry(context, done)
             }
+            "openAppSettings" -> openSettings(result) {
+                BackgroundExecutionSupport.openAppSettings(context)
+            }
+            "openBatteryOptimizationSettings" -> openSettings(result) {
+                BackgroundExecutionSupport.openBatteryOptimizationSettings(context)
+            }
             else -> result.notImplemented()
+        }
+    }
+
+    private fun openSettings(result: MethodChannel.Result, open: () -> Unit) {
+        try {
+            open()
+            result.success(null)
+        } catch (error: Exception) {
+            result.error("settings_unavailable", error.message, null)
         }
     }
 
@@ -63,16 +91,20 @@ class DeviceBridgePlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Activ
             result.error("busy", "Location permission request in progress", null)
             return
         }
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION)
-            != PackageManager.PERMISSION_GRANTED) {
+        val permissions = requiredRecordingPermissions(
+            Build.VERSION.SDK_INT,
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) ==
+                PackageManager.PERMISSION_GRANTED,
+            BackgroundExecutionSupport.notificationPermissionGranted(context),
+        )
+        if (permissions.isNotEmpty()) {
             val current = activity
             if (current == null) {
-                result.error("no_activity", "Open the app to grant location permission", null)
+                result.error("no_activity", "Open the app to grant recording permissions", null)
                 return
             }
             pendingStart = result
-            current.requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION,
-                Manifest.permission.ACCESS_COARSE_LOCATION), 8042)
+            current.requestPermissions(permissions.toTypedArray(), 8042)
             return
         }
         launch(result)
@@ -97,6 +129,9 @@ class DeviceBridgePlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Activ
         if (requestCode != 8042) return false
         val result = pendingStart ?: return false
         pendingStart = null
+        // A visible foreground-service notification is essential feedback but
+        // Android allows the location service to run after the user declines
+        // notifications. Keep recording and surface the denial in status/UI.
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION)
             == PackageManager.PERMISSION_GRANTED) launch(result)
         else result.error("permission_denied", "Precise location permission is required", null)

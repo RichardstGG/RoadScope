@@ -22,6 +22,7 @@ const _knownTriggers = {
   'recording_stopped',
   diagnosticsTelemetryInterruptedTrigger,
   'location_service',
+  diagnosticsTelemetryTaskRemovedTrigger,
   'state_change',
   'heartbeat',
 };
@@ -35,6 +36,10 @@ const _knownTriggers = {
 /// observables are deliberately unavailable, because the writer does not know
 /// what the device looked like when the segment died.
 const diagnosticsTelemetryInterruptedTrigger = 'recording_interrupted';
+
+/// Android removed the app task from Recents while the recorder service was
+/// still alive. iOS has no equivalent event.
+const diagnosticsTelemetryTaskRemovedTrigger = 'task_removed';
 
 const _knownLifecycles = {'foreground', 'inactive', 'background', 'unknown'};
 

@@ -94,20 +94,23 @@ void main() {
       String state = 'idle',
       String? logPath,
       String? telemetryPath,
+      Map<String, Object?> statusExtras = const {},
+      List<String>? calls,
     }) async {
-      messenger.setMockMethodCallHandler(
-        channel,
-        (call) async => switch (call.method) {
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        calls?.add(call.method);
+        return switch (call.method) {
           'status' => <String, Object?>{
             'state': state,
             'logPath': logPath,
             'telemetryPath': telemetryPath,
+            ...statusExtras,
           },
           'readLog' => '',
           'readTelemetry' => telemetry,
           _ => null,
-        },
-      );
+        };
+      });
       // The diagnostics list is long; give the test a surface tall enough to
       // lay all of it out instead of scrolling for every expectation.
       tester.view.physicalSize = const Size(1400, 5000);
@@ -148,6 +151,35 @@ void main() {
       // Android has no iOS protected-data signal, and that must read as
       // unavailable rather than as a false.
       expect(find.text('iOS 保護資料可用：無法取得（not available）'), findsOneWidget);
+    });
+
+    testWidgets('Android 背景設定區顯示權限風險並可開啟系統設定', (tester) async {
+      final calls = <String>[];
+      await pump(
+        tester,
+        telemetry: '',
+        calls: calls,
+        statusExtras: const {
+          'platform': 'android',
+          'manufacturer': 'Xiaomi',
+          'notificationPermissionGranted': false,
+          'batteryOptimizationIgnored': false,
+          'vendorBackgroundSetupRecommended': true,
+        },
+      );
+      expect(find.text('Android 背景執行準備'), findsOneWidget);
+      expect(find.text('裝置廠牌：Xiaomi'), findsOneWidget);
+      expect(find.text('常駐通知權限：未允許'), findsOneWidget);
+      expect(find.text('電池最佳化：仍受限制'), findsOneWidget);
+      expect(find.textContaining('允許自啟動'), findsOneWidget);
+      await tester.tap(find.text('開啟 App 權限設定'));
+      await tester.pump();
+      await tester.tap(find.text('開啟電池最佳化設定'));
+      await tester.pump();
+      expect(
+        calls,
+        containsAll(['openAppSettings', 'openBatteryOptimizationSettings']),
+      );
     });
 
     testWidgets('iOS 未知的螢幕狀態顯示 not available，不顯示成 false', (tester) async {

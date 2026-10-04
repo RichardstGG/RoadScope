@@ -95,6 +95,9 @@ final class DiagnosticsTelemetryWriter {
     /// what the device looked like when the segment died.
     case recordingInterrupted = "recording_interrupted"
     case locationService = "location_service"
+    // Android-only observation accepted here so both native writers and the
+    // Dart reader share one forward-compatible trigger vocabulary.
+    case taskRemoved = "task_removed"
     case stateChange = "state_change"
     case heartbeat
   }
@@ -121,7 +124,7 @@ final class DiagnosticsTelemetryWriter {
 
   private static let alwaysWrite: Set<Trigger> = [
     .recordingStarted, .recordingResumed, .recordingStopped, .recordingInterrupted,
-    .locationService,
+    .locationService, .taskRemoved,
   ]
 
   /// Repairs an incomplete tail and restores the sequence and last-written

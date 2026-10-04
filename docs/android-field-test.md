@@ -44,7 +44,7 @@ adb shell dumpsys package tw.idv.richardwutt.roadscope | grep -E "versionCode|ve
 
 定位權限**走 App 自己的請求流程**，不要用 adb 授予，否則測不到真實路徑。
 
-通知權限目前程式碼未在執行期請求（見 `handoff-to-codex.md` H1），需手動給：
+Android 13+ 第一次按「開始記錄」會同時請求精確定位與通知權限。拒絕通知不會阻止記錄，但畫面必須顯示「常駐通知權限：未允許」。以下命令只用於測試環境重設／排查，不是正常產品流程：
 
 ```bash
 adb shell pm grant tw.idv.richardwutt.roadscope android.permission.POST_NOTIFICATIONS
@@ -99,8 +99,7 @@ Home → 關螢幕 → 等 30 秒 → 解鎖 → 回 App → 接充電線 → �
 
 ### C — 服務／程序恢復
 
-C1：從近期工作清單滑掉 App，再查 §4 的 dumpsys —— 實測服務存活。
-（telemetry 分不出「滑掉」與「切背景」，見 `handoff-to-codex.md` H5。）
+C1：從近期工作清單滑掉 App，再查 §4 的 dumpsys。telemetry 應寫入 `task_removed`；接著仍須確認服務存活與定位樣本繼續增加。此觸發點已有自動測試，尚待真機驗證。
 
 C2，`am crash`（崩潰路徑）：
 

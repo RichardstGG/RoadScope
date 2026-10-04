@@ -190,6 +190,16 @@ void main() {
     }
   });
 
+  test('task removal trigger is synchronized and Android observes it', () {
+    final service = File(
+      'android/src/main/kotlin/tw/idv/richardwutt/device_bridge/LocationRecorderService.kt',
+    ).readAsStringSync();
+    expect(kotlin, contains('"task_removed"'));
+    expect(swift, contains('"task_removed"'));
+    expect(service, contains('override fun onTaskRemoved'));
+    expect(service, contains('noteTaskRemoved()'));
+  });
+
   test('both writers only advance their sequence after a durable append', () {
     expect(kotlin, contains('output.fd.sync()'));
     expect(swift, contains('try handle.synchronize()'));

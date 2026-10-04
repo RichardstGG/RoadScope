@@ -58,6 +58,14 @@ class LocationRecorderService : Service(), LocationListener {
         fun status(context: Context): Map<String, Any?> {
             val p = prefs(context)
             return mapOf(
+                "platform" to "android",
+                "manufacturer" to BackgroundExecutionSupport.manufacturer(),
+                "notificationPermissionGranted" to
+                    BackgroundExecutionSupport.notificationPermissionGranted(context),
+                "batteryOptimizationIgnored" to
+                    BackgroundExecutionSupport.batteryOptimizationIgnored(context),
+                "vendorBackgroundSetupRecommended" to
+                    BackgroundExecutionSupport.recommendsVendorGuidance(),
                 "state" to (p.getString("state", "idle") ?: "idle"),
                 "recordingId" to p.getString("latestId", null),
                 "logPath" to logFile(context)?.absolutePath,
@@ -344,6 +352,13 @@ class LocationRecorderService : Service(), LocationListener {
                 .putString("error", "GPS location provider was disabled").commit()
             stopSelf()
         }
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        // Distinguish removing the task from merely putting the Activity in the
+        // background. The recorder continues; this is an observation only.
+        if (::handler.isInitialized) handler.post { telemetry?.noteTaskRemoved() }
+        super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {

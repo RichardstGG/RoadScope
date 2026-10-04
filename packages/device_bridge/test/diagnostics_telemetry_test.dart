@@ -251,6 +251,18 @@ void main() {
       expect(report.records.single.unavailable, contains('future_flag'));
     });
 
+    test('task removal is a known Android lifecycle trigger', () {
+      final report = parseDiagnosticsTelemetry(
+        _line(_row()..['trigger'] = diagnosticsTelemetryTaskRemovedTrigger),
+      );
+      expect(report.ok, isTrue);
+      expect(_codes(report), isNot(contains('UNKNOWN_ENUM_VALUE')));
+      expect(
+        report.records.single.trigger,
+        diagnosticsTelemetryTaskRemovedTrigger,
+      );
+    });
+
     test('an interrupted segment is readable and flagged', () {
       final started = _row();
       final interrupted = _row()

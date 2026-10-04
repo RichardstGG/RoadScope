@@ -56,7 +56,7 @@
 | `appVersion` | string | 例如 `0.0.2+2` |
 | `deviceBootId` | string\|null | 與 location-log 同一次 boot 判定；null 時帶 `device_boot_id_unavailable` |
 | `telemetrySequence` | int | 自 `0` 起算，成功落盤後才遞增 |
-| `trigger` | string | `recording_started`／`recording_resumed`／`recording_stopped`／`recording_interrupted`／`location_service`／`state_change`／`heartbeat`；見 §4.1 |
+| `trigger` | string | `recording_started`／`recording_resumed`／`recording_stopped`／`recording_interrupted`／`location_service`／`task_removed`／`state_change`／`heartbeat`；見 §4.1 |
 | `reasons` | string[] | 與上一筆相比改變的欄位名；第一筆為 `["initial_snapshot"]` |
 | `occurredAtUtc` | string\|null | RFC3339，字面 `Z` 結尾。帶本地位移為非法 |
 | `occurredMonotonicUs` | int\|null | 含睡眠的單調時間，微秒 |
@@ -154,7 +154,8 @@ Android，鎖屏那一刻（為閱讀換行，實際為單行）：
 
 ### 兩端共同
 
-- 寫入時機是**狀態改變**加上低頻 heartbeat（預設 300 秒），不跟著定位 callback 寫；狀態沒變的 `state_change` 不寫檔，以免額外耗電與寫入。生命週期類 trigger（開始／恢復／停止／中斷／定位服務變化）即使狀態沒變也一定寫。
+- 寫入時機是**狀態改變**加上低頻 heartbeat（預設 300 秒），不跟著定位 callback 寫；狀態沒變的 `state_change` 不寫檔，以免額外耗電與寫入。生命週期類 trigger（開始／恢復／停止／中斷／定位服務變化／Android task 被移除）即使狀態沒變也一定寫。
+- Android `Service.onTaskRemoved()` 會寫入 `task_removed`，用來區分「從近期工作清單滑掉 App」與一般切到背景。它只表示 task 被移除；服務是否繼續執行仍要看後續 telemetry、定位樣本與系統狀態。
 - **heartbeat 只是下限，不是週期。** 觸發器每 300 秒跑一次，但只在「距上次寫入 ≥300 秒」時才寫；被略過的觸發**不會提前補排**。因此兩列 telemetry 的間隔上限約為 2×300＝600 秒（201 分鐘實測 max 581 秒）。**判讀時不可把「telemetry 間隔 >300 秒」當成異常。** 反之，狀態變化頻繁時 heartbeat 可能一列都不寫，那也是正確的（38 分鐘充電測試即為 0 列）。
 - 序號只在成功落盤（`fsync`／`synchronize`）後遞增。
 - 單調時間只在同一個 `deviceBootId` 內可相減，跨 boot、跨裝置相減一律非法。
@@ -231,7 +232,7 @@ dart run bin/inspect_telemetry.dart /absolute/path/to/exported.telemetry.ndjson
 - 兩種格式分開匯出，分享文字各自正確
 - keyguard 時序可量測：該機關螢幕時 keyguard 鎖定延遲 0 ms（兩次採集一致）。亮屏到解鎖之間的「螢幕亮著且鎖定」狀態**取決於解鎖方式**：密碼解鎖時為 3.886 秒並寫成獨立一列，生物辨識解鎖時完全沒有出現
 - `appLifecycle` 初始值修復後實測：第一列即為 `foreground`，一次 4 分鐘採集的 8 列全部有真實值、`app_lifecycle_unknown` 旗標 0 次；**畫面也確認顯示「前景」**
-- 授予 `POST_NOTIFICATIONS` 後**常駐通知在畫面上確實可見**（使用者目視確認）。程式碼仍未在執行期請求該權限，見 `docs/handoff-to-codex.md` H1
+- 授予 `POST_NOTIFICATIONS` 後**常駐通知在畫面上確實可見**（使用者目視確認）。Android 13+ 的開始流程現在會在執行期請求該權限；拒絕不會阻止記錄，但診斷畫面會顯示警告。此新流程仍待真機驗證。
 - `recording_interrupted` 端對端實測：記錄中被終止後按停止，補寫的那一列 `locationLogLastSequence` 等於紀錄中實際最後一筆樣本序號，裝置欄位全部不可得，location-log 未被加入任何事件
 - 戶外 4 分鐘採集：245 筆樣本零缺口、間隔中位 1.000 秒、無 >5 秒空窗、水平精度中位 1.6 公尺、品質旗標 0 筆；鎖屏 73.7 秒期間 74 筆樣本未中斷
 - **201 分鐘連續採集（長時間驗收）**：12063 筆樣本、序號零缺口、間隔 median／p95／p99 皆 1.000 秒、**max 1.500 秒、沒有任何 >2 秒的空窗**；水平精度中位 2.1 公尺、品質旗標 0 筆；事件只有 `recording_started`（無截斷、無校時、無恢復）；location-log 6.82 MiB ≈ 2.0 MiB／小時
