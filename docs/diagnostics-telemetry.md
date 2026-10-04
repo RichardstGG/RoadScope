@@ -219,6 +219,8 @@ dart run bin/inspect_telemetry.dart /absolute/path/to/exported.telemetry.ndjson
 
 ## 9. 真機驗證現況
 
+流程、命令與證據索引見 [`android-field-test.md`](android-field-test.md)。
+
 裝置：Xiaomi 21081111RG（小米 11T Pro）、Android 14／SDK 34、MIUI `V816.0.15.0.UKWTWXM`。**只有這一台**，而 MIUI 是公認最激進的省電實作，下列結論不可推廣到其他品牌。
 
 ### 已驗證（hardware tests）

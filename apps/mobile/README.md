@@ -64,4 +64,4 @@ dart run bin/inspect_telemetry.dart /absolute/path/to/exported.telemetry.ndjson
 
 請保存命令輸出、開始／結束 UTC 與測試紀錄，並回報任何 >5 秒空窗的當時螢幕／電源狀態。`callback gaps` 是原生收到樣本的間隔，並非定位或計時精度。完成兩種時長和兩平台測試後，才能對背景穩定性提出實測結論；目前尚未取得真機證據。
 
-工具版本、Linux／Mac 建置命令見 [`docs/mobile-toolchain.md`](../../docs/mobile-toolchain.md)。P0 真機驗證依根目錄 [`05-mac-iphone-checklist.md`](../../05-mac-iphone-checklist.md) 執行。
+完整的 Android 真機流程、adb 命令、分析命令、判讀陷阱與證據索引見 [`docs/android-field-test.md`](../../docs/android-field-test.md)。工具版本、Linux／Mac 建置命令見 [`docs/mobile-toolchain.md`](../../docs/mobile-toolchain.md)。P0 真機驗證依根目錄 [`05-mac-iphone-checklist.md`](../../05-mac-iphone-checklist.md) 執行。
