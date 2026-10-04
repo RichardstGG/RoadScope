@@ -154,17 +154,22 @@ Android，鎖屏那一刻（為閱讀換行，實際為單行）：
 
 ### 兩端共同
 
-- 寫入時機是**狀態改變**加上低頻 heartbeat（預設 300 秒），不跟著定位 callback 寫；狀態沒變的 `state_change` 不寫檔，以免額外耗電與寫入。生命週期類 trigger（開始／恢復／停止／定位服務變化）即使狀態沒變也一定寫。
+- 寫入時機是**狀態改變**加上低頻 heartbeat（預設 300 秒），不跟著定位 callback 寫；狀態沒變的 `state_change` 不寫檔，以免額外耗電與寫入。生命週期類 trigger（開始／恢復／停止／中斷／定位服務變化）即使狀態沒變也一定寫。
+- **heartbeat 只是下限，不是週期。** 觸發器每 300 秒跑一次，但只在「距上次寫入 ≥300 秒」時才寫；被略過的觸發**不會提前補排**。因此兩列 telemetry 的間隔上限約為 2×300＝600 秒（201 分鐘實測 max 581 秒）。**判讀時不可把「telemetry 間隔 >300 秒」當成異常。** 反之，狀態變化頻繁時 heartbeat 可能一列都不寫，那也是正確的（38 分鐘充電測試即為 0 列）。
 - 序號只在成功落盤（`fsync`／`synchronize`）後遞增。
 - 單調時間只在同一個 `deviceBootId` 內可相減，跨 boot、跨裝置相減一律非法。
 - telemetry 寫入失敗一律吞掉：診斷不得把它想描述的那次記錄弄掛。
 
 ## 6. 怎麼讀這些資料
 
-- **電量**：以 `occurredAtUtc` 搭配 `batteryPercent` 計算一段時間的耗電。`batteryCharging` 為 true 的區段要排除。單次測量不構成續航結論，沒有量測前不給續航保證。
+- **電量**：以 `occurredAtUtc` 搭配 `batteryPercent` 計算一段時間的耗電。`batteryCharging` 為 true 的區段**必須排除**（實測一次 38 分鐘測試有 30.5 分鐘在充電，耗電完全算不出來）。同時要記下螢幕關閉比例與 App 前後台比例，否則數字不可比。單次測量不構成續航結論。
 - **前後台**：`appLifecycle` 說的是 App 的狀態，不是螢幕狀態。`background` 期間仍可能有定位樣本（Android 前景服務／iOS 背景定位）。
 - **螢幕／鎖屏**：Android 可同時看 `screenInteractive` 與 `keyguardLocked`；`screenInteractive=false` 加 `keyguardLocked=true` 是最接近「鎖屏中」的可觀測組合，但仍是兩個 API 的狀態，不是鎖屏事件。iOS 只能看 `protectedDataAvailable`，且只能當弱訊號。
-- **`screenInteractive=true` 加 `keyguardLocked=true`（亮屏但鎖定）不一定會出現。** 同一台裝置實測：以密碼解鎖時這個中間狀態持續 3.886 秒並被寫成獨立一列；以生物辨識解鎖時亮屏與解鎖落在同一次廣播處理內，中間狀態完全沒有被觀測到。因此**不能**用它偵測「使用者正在看鎖定畫面」。
+- **兩個螢幕欄位的時序不保證同步，不要互相推導。** 同一台裝置 201 分鐘內 56 次螢幕狀態變化的實測：
+  - `screenInteractive=true` 加 `keyguardLocked=true`（亮屏但鎖定）**會反覆出現**（該次 19 次），但也可能完全不出現——取決於亮屏與解鎖是否落在同一次廣播處理內（生物辨識解鎖常常如此）。
+  - keyguard 的**鎖定延遲不一定是 0 ms**。多數情況處理 `SCREEN_OFF` 時 keyguard 已鎖上（兩欄位同列改變），但實測有一次關螢幕當下 `keyguardLocked` 仍為 false，**758 ms 後**才在另一列變成 true。
+
+  因此**不能**用其中一個欄位推論另一個，也不能用這個組合偵測「使用者正在看鎖定畫面」。
 - **定位服務**：`started`／`restarted` 搭配 `processRestartCount` 與 `resumeReason` 可看出系統是否重建過服務或程序。`failed` 會帶 `locationServiceDetail`。
 - **對齊定位紀錄**：用 `locationLogLastSequence` 找出 telemetry 當時定位紀錄寫到哪一筆，再回去看那段樣本的間隔。
 - `unknown`／`not available` 在畫面與資料中都保持原樣。看到 `unknown` 就是不知道，不要當成正常或 false。
@@ -227,6 +232,10 @@ dart run bin/inspect_telemetry.dart /absolute/path/to/exported.telemetry.ndjson
 - 授予 `POST_NOTIFICATIONS` 後**常駐通知在畫面上確實可見**（使用者目視確認）。程式碼仍未在執行期請求該權限，見 `docs/handoff-to-codex.md` H1
 - `recording_interrupted` 端對端實測：記錄中被終止後按停止，補寫的那一列 `locationLogLastSequence` 等於紀錄中實際最後一筆樣本序號，裝置欄位全部不可得，location-log 未被加入任何事件
 - 戶外 4 分鐘採集：245 筆樣本零缺口、間隔中位 1.000 秒、無 >5 秒空窗、水平精度中位 1.6 公尺、品質旗標 0 筆；鎖屏 73.7 秒期間 74 筆樣本未中斷
+- **201 分鐘連續採集（長時間驗收）**：12063 筆樣本、序號零缺口、間隔 median／p95／p99 皆 1.000 秒、**max 1.500 秒、沒有任何 >2 秒的空窗**；水平精度中位 2.1 公尺、品質旗標 0 筆；事件只有 `recording_started`（無截斷、無校時、無恢復）；location-log 6.82 MiB ≈ 2.0 MiB／小時
+- **鎖屏背景採集**：上述測試螢幕關閉 92.1%、keyguard 鎖定 93.3%、App 在背景 99.1%。最長連續螢幕關閉 60.4 分鐘內 3623 筆樣本、最大間隔 1.001 秒。201 分鐘內 MIUI 未介入（`processRestartCount` 全程 0、無恢復或中斷標記）
+- **heartbeat 首次真機觀測**：201 分鐘寫出 10 列，時間全部落在自記錄開始起算的 300 秒鏈上
+- **耗電（單次觀測，非續航保證）**：51% → 19%，201.1 分鐘，約 **−9.5 %／小時**。限定條件：螢幕關閉 92.1%、App 背景 99.1%、1 Hz GPS、省電模式關閉、未充電、Xiaomi 11T Pro。**此數字包含手機同時在做的其他事情，不能單獨歸因給本 App。**
 - 程序在 append 完成後 59 ms 被終止，檔尾仍完整、無損壞行（**單次觀察**）
 - **SIGKILL 後 START_STICKY 前景服務在 5 秒內被系統重建**，寫出 `recording_resumed`（`reason: process_restart`、`resumedSequence`）與 telemetry 的 `restarted`／`process_restart`／`processRestartCount: 1`，同一 `recordingId` 與 `deviceBootId`
 
@@ -245,8 +254,9 @@ dart run bin/inspect_telemetry.dart /absolute/path/to/exported.telemetry.ndjson
 ### 尚未驗證（`untested`／待 `hardware tests`）
 
 - **跨程序重啟的序號接續**：重建成功那次在被殺之前還沒有任何樣本（室內無 fix），所以 `resumedSequence` 是 0，沒有真正驗到序號從非零接續
-- 30 分鐘／2 小時長時間採集；telemetry 檔案大小與缺口分布
-- **heartbeat 從未被觀測到**：所有採集都短於 300 秒的門檻
+- **合規的 30 分鐘採集**：已跑的 38 分鐘那次全程接著 AC 充電、螢幕關閉僅 61 秒（2.7%），不符合 `docs/engineering-rules.md` §3 交接條件 1 的「含鎖屏區段」。201 分鐘那次在每個面向都更強，技術上已涵蓋，但形式上該條件尚未被一次 30 分鐘採集滿足
+- **多次耗電量測**：目前只有一次觀測，無法給區間或排除其他 App 的影響
+- **移動中採集**：所有測試都在靜止或近靜止狀態，未驗證行駛中的採樣與精度
 - telemetry 自身的耗電（預期遠低於定位紀錄，但未量測）
 - 各廠牌鎖屏／AOD／抬手喚醒下 `isInteractive`／`isKeyguardLocked` 的值
 - 真正的低記憶體回收（目前只用 SIGKILL 與 `am crash` 模擬）
