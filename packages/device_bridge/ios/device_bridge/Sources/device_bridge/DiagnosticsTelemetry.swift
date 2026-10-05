@@ -87,7 +87,17 @@ final class DiagnosticsTelemetryWriter {
     case recordingStarted = "recording_started"
     case recordingResumed = "recording_resumed"
     case recordingStopped = "recording_stopped"
+    /// A segment that ended without writing its own closing row, noticed
+    /// afterwards by a later process. Its timestamps are **when the
+    /// interruption was noticed**, not when it happened; the actual end is
+    /// bounded by `locationLogLastSequence` and the previous row's time. The
+    /// device observables stay unavailable on purpose, because we do not know
+    /// what the device looked like when the segment died.
+    case recordingInterrupted = "recording_interrupted"
     case locationService = "location_service"
+    // Android-only observation accepted here so both native writers and the
+    // Dart reader share one forward-compatible trigger vocabulary.
+    case taskRemoved = "task_removed"
     case stateChange = "state_change"
     case heartbeat
   }
@@ -113,7 +123,8 @@ final class DiagnosticsTelemetryWriter {
   }
 
   private static let alwaysWrite: Set<Trigger> = [
-    .recordingStarted, .recordingResumed, .recordingStopped, .locationService,
+    .recordingStarted, .recordingResumed, .recordingStopped, .recordingInterrupted,
+    .locationService, .taskRemoved,
   ]
 
   /// Repairs an incomplete tail and restores the sequence and last-written
@@ -153,7 +164,15 @@ final class DiagnosticsTelemetryWriter {
   func record(_ trigger: Trigger, _ observation: TelemetryObservation,
               utc: Date?, monotonicUs: Int64?, deviceBootId: String?,
               locationLogLastSequence: Int) -> Bool {
-    let changes = last.map { observation.changes(from: $0) } ?? ["initial_snapshot"]
+    // The interrupted marker deliberately claims nothing about the device, so
+    // a field-by-field diff against the last row would read as if the battery
+    // and screen had just become unavailable. Name the real reason.
+    let changes: [String]
+    if trigger == .recordingInterrupted {
+      changes = ["previous_segment_not_closed"]
+    } else {
+      changes = last.map { observation.changes(from: $0) } ?? ["initial_snapshot"]
+    }
     if !DiagnosticsTelemetryWriter.alwaysWrite.contains(trigger) {
       if trigger == .heartbeat {
         if let since = lastWriteMonotonicUs, let now = monotonicUs,

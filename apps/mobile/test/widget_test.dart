@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -93,20 +94,23 @@ void main() {
       String state = 'idle',
       String? logPath,
       String? telemetryPath,
+      Map<String, Object?> statusExtras = const {},
+      List<String>? calls,
     }) async {
-      messenger.setMockMethodCallHandler(
-        channel,
-        (call) async => switch (call.method) {
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        calls?.add(call.method);
+        return switch (call.method) {
           'status' => <String, Object?>{
             'state': state,
             'logPath': logPath,
             'telemetryPath': telemetryPath,
+            ...statusExtras,
           },
           'readLog' => '',
           'readTelemetry' => telemetry,
           _ => null,
-        },
-      );
+        };
+      });
       // The diagnostics list is long; give the test a surface tall enough to
       // lay all of it out instead of scrolling for every expectation.
       tester.view.physicalSize = const Size(1400, 5000);
@@ -149,6 +153,35 @@ void main() {
       expect(find.text('iOS 保護資料可用：無法取得（not available）'), findsOneWidget);
     });
 
+    testWidgets('Android 背景設定區顯示權限風險並可開啟系統設定', (tester) async {
+      final calls = <String>[];
+      await pump(
+        tester,
+        telemetry: '',
+        calls: calls,
+        statusExtras: const {
+          'platform': 'android',
+          'manufacturer': 'Xiaomi',
+          'notificationPermissionGranted': false,
+          'batteryOptimizationIgnored': false,
+          'vendorBackgroundSetupRecommended': true,
+        },
+      );
+      expect(find.text('Android 背景執行準備'), findsOneWidget);
+      expect(find.text('裝置廠牌：Xiaomi'), findsOneWidget);
+      expect(find.text('常駐通知權限：未允許'), findsOneWidget);
+      expect(find.text('電池最佳化：仍受限制'), findsOneWidget);
+      expect(find.textContaining('允許自啟動'), findsOneWidget);
+      await tester.tap(find.text('開啟 App 權限設定'));
+      await tester.pump();
+      await tester.tap(find.text('開啟電池最佳化設定'));
+      await tester.pump();
+      expect(
+        calls,
+        containsAll(['openAppSettings', 'openBatteryOptimizationSettings']),
+      );
+    });
+
     testWidgets('iOS 未知的螢幕狀態顯示 not available，不顯示成 false', (tester) async {
       await pump(
         tester,
@@ -172,6 +205,59 @@ void main() {
       expect(find.text('定位服務狀態：已重建'), findsOneWidget);
       expect(find.text('恢復原因：重開機後恢復'), findsOneWidget);
       expect(find.text('程序重啟次數：1'), findsOneWidget);
+    });
+
+    testWidgets('上一段非正常結束時明確警告，並指出定位寫到哪', (tester) async {
+      final rows = File('$fixtures/android-state-changes.ndjson')
+          .readAsLinesSync()
+          .where((line) => line.trim().isNotEmpty)
+          .toList();
+      final interrupted = jsonDecode(rows.first) as Map<String, Object?>
+        ..['telemetrySequence'] = 5
+        ..['trigger'] = 'recording_interrupted'
+        ..['reasons'] = <String>[]
+        ..['locationLogLastSequence'] = 41
+        ..['batteryPercent'] = null
+        ..['batteryCharging'] = null
+        ..['batteryPowerSource'] = 'unknown'
+        ..['powerSaveMode'] = null
+        ..['screenInteractive'] = null
+        ..['keyguardLocked'] = null
+        ..['appLifecycle'] = 'unknown'
+        ..['locationServiceState'] = 'unknown'
+        ..['unavailable'] = [
+          'protected_data_state_unavailable',
+          'battery_percent_unavailable',
+          'battery_charging_unavailable',
+          'battery_power_source_unknown',
+          'power_save_mode_unavailable',
+          'screen_interactive_unavailable',
+          'keyguard_state_unavailable',
+          'app_lifecycle_unknown',
+          'location_service_state_unknown',
+        ];
+      await pump(
+        tester,
+        telemetry: '${rows.first}\n${jsonEncode(interrupted)}\n',
+        telemetryPath: '/tmp/rec.telemetry.ndjson',
+      );
+      expect(find.text('觸發原因：上一段非正常結束'), findsOneWidget);
+      expect(find.textContaining('上一段記錄沒有自己收尾'), findsOneWidget);
+      expect(find.textContaining('寫到序號 41 為止'), findsOneWidget);
+      // Nothing about the device at the moment of death is shown as a value.
+      expect(find.text('電量：無法取得（not available）'), findsOneWidget);
+      expect(find.text('App 狀態：未知（unknown）'), findsOneWidget);
+    });
+
+    testWidgets('正常結束不顯示非正常結束的警告', (tester) async {
+      await pump(
+        tester,
+        telemetry: File('$fixtures/android-state-changes.ndjson')
+            .readAsStringSync(),
+        telemetryPath: '/tmp/rec.telemetry.ndjson',
+      );
+      expect(find.text('觸發原因：停止記錄'), findsOneWidget);
+      expect(find.textContaining('上一段記錄沒有自己收尾'), findsNothing);
     });
 
     testWidgets('壞資料不會讓畫面崩潰，並回報壞行數', (tester) async {

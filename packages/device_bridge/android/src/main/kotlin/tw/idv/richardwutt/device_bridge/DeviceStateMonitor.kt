@@ -87,13 +87,28 @@ internal class DeviceStateMonitor(
         }
     }
 
-    /** Registers the state sources and writes the opening row for this segment. */
-    fun start(serviceState: String, restartCount: Int, resume: String?) {
+    /**
+     * Registers the state sources and writes the opening row for this segment.
+     *
+     * [initialForeground] seeds the activity state, because
+     * `ActivityLifecycleCallbacks` never replays the activity that was already
+     * started before we registered. Without it the opening row — the one that
+     * answers "was the app in the foreground when recording began?" — would
+     * always read `unknown`, and a recording that never leaves the foreground
+     * would read `unknown` throughout. Pass `null` when it is genuinely not
+     * known, such as a service restarted by the system with no activity.
+     */
+    fun start(serviceState: String, restartCount: Int, resume: String?,
+        initialForeground: Boolean?) {
         if (running) return
         running = true
         processRestartCount = restartCount
         resumeReason = resume
         locationServiceState = serviceState
+        if (initialForeground != null) {
+            sawActivity = true
+            startedActivities = if (initialForeground) 1 else 0
+        }
         writer.recover()
         val filter = IntentFilter().apply {
             addAction(Intent.ACTION_BATTERY_CHANGED)
@@ -130,6 +145,11 @@ internal class DeviceStateMonitor(
         locationServiceState = state
         locationServiceDetail = detail
         if (running) record(TelemetryLogWriter.TRIGGER_LOCATION_SERVICE)
+    }
+
+    /** Records that Android removed the app task while the service remained. */
+    fun noteTaskRemoved() {
+        if (running) record(TelemetryLogWriter.TRIGGER_TASK_REMOVED)
     }
 
     fun snapshot() = TelemetrySnapshot(

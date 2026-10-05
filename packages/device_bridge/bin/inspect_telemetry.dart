@@ -44,6 +44,12 @@ void main(List<String> arguments) {
       counts[record.trigger] = (counts[record.trigger] ?? 0) + 1;
     }
     if (counts.isNotEmpty) stdout.writeln('  triggers: $counts');
+    if (report.lastSegmentInterrupted) {
+      stdout.writeln(
+        '  WARNING: the last segment ended without closing itself '
+        '(process killed, crashed or power cut)',
+      );
+    }
     final latest = report.latest;
     if (latest != null) {
       stdout.writeln(

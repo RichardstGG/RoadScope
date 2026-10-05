@@ -148,6 +148,19 @@ class TelemetryLogWriterTest {
         export(file, "heartbeat")
     }
 
+    @Test fun `task removal is written even when observable state is unchanged`() {
+        val file = File(directory, "telemetry.ndjson")
+        val writer = writer(file)
+        writer.record(TelemetryLogWriter.TRIGGER_RECORDING_STARTED,
+            snapshot(), utc, mono, "boot-a", -1L)
+        assertTrue(writer.record(TelemetryLogWriter.TRIGGER_TASK_REMOVED,
+            snapshot(lifecycle = "background"), utc + 1000, mono + 1_000_000, "boot-a", 4L))
+        assertTrue(writer.record(TelemetryLogWriter.TRIGGER_TASK_REMOVED,
+            snapshot(lifecycle = "background"), utc + 2000, mono + 2_000_000, "boot-a", 5L))
+        assertEquals(listOf("recording_started", "task_removed", "task_removed"),
+            rows(file).map { it.getString("trigger") })
+    }
+
     @Test fun `incomplete tail is repaired and the restored state survives a restart`() {
         val file = File(directory, "telemetry.ndjson")
         val first = writer(file)
@@ -198,6 +211,61 @@ class TelemetryLogWriterTest {
         assertEquals(1, appended.getInt("telemetrySequence"))
         assertEquals("recording_resumed", appended.getString("trigger"))
         assertTrue(file.readText().contains("not-json"))
+    }
+
+    @Test fun `an interrupted segment is marked without claiming device state`() {
+        val file = File(directory, "telemetry.ndjson")
+        val first = writer(file)
+        first.record(TelemetryLogWriter.TRIGGER_RECORDING_STARTED, snapshot(), utc, mono, "boot-a", -1L)
+        first.record(TelemetryLogWriter.TRIGGER_STATE_CHANGE,
+            snapshot(percent = 80), utc + 1000, mono + 1_000_000, "boot-a", 20L)
+
+        // A later process notices that the segment never closed itself.
+        val later = writer(file)
+        later.recover()
+        assertTrue(later.record(TelemetryLogWriter.TRIGGER_RECORDING_INTERRUPTED,
+            TelemetrySnapshot(
+                locationServiceDetail = "previous process ended without a closing telemetry row",
+                processRestartCount = 0),
+            utc + 60_000, mono + 60_000_000, "boot-a", 41L))
+        val row = rows(file).last()
+        assertEquals("recording_interrupted", row.getString("trigger"))
+        assertEquals(2, row.getInt("telemetrySequence"))
+        // The only hard fact about where collection got to.
+        assertEquals(41, row.getInt("locationLogLastSequence"))
+        assertEquals("previous process ended without a closing telemetry row",
+            row.getString("locationServiceDetail"))
+        // Not a field-by-field diff: the values did not become unavailable,
+        // we simply never knew them.
+        assertEquals(listOf("previous_segment_not_closed"),
+            (0 until row.getJSONArray("reasons").length())
+                .map { row.getJSONArray("reasons").getString(it) })
+        // Nothing is claimed about the device at the moment the segment died.
+        for (key in listOf("batteryPercent", "batteryCharging", "powerSaveMode",
+            "screenInteractive", "keyguardLocked")) {
+            assertTrue(row.isNull(key), "$key must not be claimed")
+        }
+        assertTrue(flags(row).containsAll(listOf(
+            "battery_percent_unavailable", "battery_charging_unavailable",
+            "power_save_mode_unavailable", "screen_interactive_unavailable",
+            "keyguard_state_unavailable", "app_lifecycle_unknown",
+            "location_service_state_unknown", "battery_power_source_unknown")))
+        export(file, "interrupted")
+    }
+
+    @Test fun `the interrupted marker is written even when nothing changed`() {
+        val file = File(directory, "telemetry.ndjson")
+        val writer = writer(file)
+        val interrupted = TelemetrySnapshot(processRestartCount = 0)
+        assertTrue(writer.record(TelemetryLogWriter.TRIGGER_RECORDING_INTERRUPTED,
+            interrupted, utc, mono, "boot-a", 5L))
+        // Same state again as a plain state change writes nothing...
+        assertFalse(writer.record(TelemetryLogWriter.TRIGGER_STATE_CHANGE,
+            interrupted, utc + 1000, mono + 1_000_000, "boot-a", 5L))
+        // ...but the lifecycle marker always does.
+        assertTrue(writer.record(TelemetryLogWriter.TRIGGER_RECORDING_INTERRUPTED,
+            interrupted, utc + 2000, mono + 2_000_000, "boot-a", 5L))
+        assertEquals(2, rows(file).size)
     }
 
     @Test fun `a failed append does not advance the sequence`() {

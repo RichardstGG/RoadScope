@@ -118,6 +118,14 @@ class _RecorderScreenState extends State<RecorderScreen>
     }
   }
 
+  Future<void> _openSettings(Future<void> Function() open) async {
+    try {
+      await open();
+    } catch (error) {
+      if (mounted) setState(() => _error = error.toString());
+    }
+  }
+
   String _stateLabel(String? state) => switch (state) {
     'recording' => '記錄中',
     'waiting_permission' => '等待定位授權',
@@ -139,6 +147,73 @@ class _RecorderScreenState extends State<RecorderScreen>
     if (value == null || value.isEmpty) return '無法取得（not available）';
     if (value == 'unknown') return '未知（unknown）';
     return labels[value] ?? '$value（未知值）';
+  }
+
+  String _vendorGuidance(String? manufacturer) {
+    final vendor = manufacturer?.toLowerCase() ?? '';
+    if (vendor.contains('xiaomi') ||
+        vendor.contains('redmi') ||
+        vendor.contains('poco')) {
+      return '請在小米系統設定中允許自啟動，並將電池用量設為無限制。'
+          '自啟動是廠商私有設定，App 無法可靠讀取是否已開啟。';
+    }
+    if (vendor.contains('oppo') ||
+        vendor.contains('oneplus') ||
+        vendor.contains('realme')) {
+      return '請允許自動啟動／關聯啟動，並將電池用量設為允許背景活動。'
+          '這些廠商設定無法由 App 可靠讀取。';
+    }
+    if (vendor.contains('vivo') || vendor.contains('iqoo')) {
+      return '請在背景耗電管理與自啟動管理中允許 RoadScope。'
+          '這些廠商設定無法由 App 可靠讀取。';
+    }
+    if (vendor.contains('huawei') || vendor.contains('honor')) {
+      return '請在應用程式啟動管理中改為手動管理，允許自動啟動與背景執行。'
+          '這些廠商設定無法由 App 可靠讀取。';
+    }
+    return '請確認系統允許 RoadScope 在背景執行。';
+  }
+
+  List<Widget> _backgroundExecutionSection(BuildContext context) {
+    final status = _status;
+    if (status?.platform != 'android') return const [];
+    final notificationGranted = status?.notificationPermissionGranted;
+    final batteryIgnored = status?.batteryOptimizationIgnored;
+    final needsAttention =
+        notificationGranted != true ||
+        batteryIgnored != true ||
+        status?.vendorBackgroundSetupRecommended == true;
+    return [
+      const Divider(height: 32),
+      Text('Android 背景執行準備', style: Theme.of(context).textTheme.titleMedium),
+      _detail('裝置廠牌', status?.manufacturer ?? '未知（unknown）'),
+      _detail('常駐通知權限', _flag(notificationGranted, '已允許', '未允許')),
+      _detail('電池最佳化', _flag(batteryIgnored, '已排除', '仍受限制')),
+      if (needsAttention)
+        Text(
+          '長時間測試前請完成下列設定。通知被拒絕不會阻止開始記錄，'
+          '但使用者看不到常駐通知，背景採集證據也會缺少重要條件。',
+          style: TextStyle(color: Theme.of(context).colorScheme.error),
+        ),
+      if (status?.vendorBackgroundSetupRecommended == true)
+        Text(_vendorGuidance(status?.manufacturer)),
+      Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children: [
+          OutlinedButton(
+            onPressed: () => _openSettings(_bridge.openAppSettings),
+            child: const Text('開啟 App 權限設定'),
+          ),
+          OutlinedButton(
+            onPressed: () =>
+                _openSettings(_bridge.openBatteryOptimizationSettings),
+            child: const Text('開啟電池最佳化設定'),
+          ),
+        ],
+      ),
+      const Text('返回 RoadScope 後會重新讀取公開狀態；廠商自啟動開關仍需人工確認。'),
+    ];
   }
 
   List<Widget> _telemetrySection(BuildContext context) {
@@ -222,7 +297,19 @@ class _RecorderScreenState extends State<RecorderScreen>
               : '${record.occurredMonotonicUs} µs',
         ),
         _detail('對應的最後定位序號', '${record.locationLogLastSequence}'),
-        _detail('觸發原因', record.trigger),
+        _detail(
+          '觸發原因',
+          _enumLabel(record.trigger, const {
+            'recording_started': '開始記錄',
+            'recording_resumed': '續錄',
+            'recording_stopped': '停止記錄',
+            'recording_interrupted': '上一段非正常結束',
+            'location_service': '定位服務變化',
+            'task_removed': '近期工作清單已移除',
+            'state_change': '狀態改變',
+            'heartbeat': '定期回報',
+          }),
+        ),
         _detail(
           'telemetry 筆數／壞行',
           '${report!.records.length}／${report.badLines}',
@@ -231,6 +318,14 @@ class _RecorderScreenState extends State<RecorderScreen>
           _detail('無法取得的欄位', record.unavailable.join('、')),
       ],
       _detail('telemetry 可匯出', exportable ? '可匯出' : '目前不可匯出'),
+      // An abrupt end with no marker is still possible, so this warning only
+      // fires when the writer managed to record one.
+      if (report?.lastSegmentInterrupted ?? false)
+        Text(
+          '上一段記錄沒有自己收尾（程序被終止、崩潰或斷電）。'
+          '定位紀錄寫到序號 ${record!.locationLogLastSequence} 為止。',
+          style: TextStyle(color: Theme.of(context).colorScheme.error),
+        ),
       const Text('telemetry 是事後判讀用的診斷資訊，不證明背景採集穩定。'),
     ];
   }
@@ -358,6 +453,7 @@ class _RecorderScreenState extends State<RecorderScreen>
               '請先停止記錄再匯出。兩個檔案分開匯出：location-log v1 含精確位置，'
               'diagnostics telemetry 只含裝置與 App 狀態。',
             ),
+            ..._backgroundExecutionSection(context),
             ..._telemetrySection(context),
           ],
         ),
