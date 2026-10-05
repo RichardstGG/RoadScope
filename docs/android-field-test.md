@@ -99,7 +99,7 @@ Home → 關螢幕 → 等 30 秒 → 解鎖 → 回 App → 接充電線 → �
 
 ### C — 服務／程序恢復
 
-C1：從近期工作清單滑掉 App，再查 §4 的 dumpsys。telemetry 應寫入 `task_removed`；接著仍須確認服務存活與定位樣本繼續增加。此觸發點已有自動測試，尚待真機驗證。
+C1：從近期工作清單滑掉 App，再查 §4 的 dumpsys。telemetry 應寫入 `task_removed`；接著仍須確認服務存活與定位樣本繼續增加。2026-10-05 已在小米真機驗證 trigger 與服務存活；該次位於室內且沒有 GPS fix，因此定位樣本是否繼續增加仍要由有 fix 的採集覆蓋。
 
 C2，`am crash`（崩潰路徑）：
 
@@ -232,3 +232,4 @@ jq -r 'select(.recordType=="sample")|[.sequence,.measuredAtUtc,.measurementMonot
 | `2026-10-04-30min` | 38.4 分，2304 樣本／39 telemetry | 資料完整，但**全程充電且螢幕關閉僅 2.7%**，不符驗收條件 |
 | `2026-10-04-2hour` | **201 分，12063 樣本／107 telemetry** | 零缺口、無 >2 秒空窗、鎖屏 92.1%、heartbeat 10 列、耗電 −9.5 %/小時 |
 | `2026-10-04-env-after-permission-change.txt` | 權限調整後的 appops／白名單快照 | 長時間測試的環境基準 |
+| `2026-10-05-pr8-short` | 室內短測，0 樣本／1 event／15 telemetry | PR #8 通知權限執行期請求、設定頁入口與狀態刷新、`task_removed` 寫入及前景服務存活；telemetry 0 bad lines |

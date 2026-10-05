@@ -14,7 +14,7 @@
 ## H1 · `POST_NOTIFICATIONS` 未在執行期請求
 
 - **擁有者路徑**：`apps/mobile/`、`packages/device_bridge/android/`
-- **狀態**：已實作，待 Android 真機驗證（`mobile/diagnostics-followups`）
+- **狀態**：已解決（PR #8；2026-10-05 Android 真機驗證）
 - **為什麼不在本次範圍**：本次任務是「App 端診斷 telemetry」。加入執行期權限請求是 App 權限流程的行為變更，不屬於 telemetry。
 
 `AndroidManifest.xml` 宣告了 `POST_NOTIFICATIONS`，但程式碼**從未在執行期請求**（`DeviceBridgePlugin.kt` 只請求 `ACCESS_FINE_LOCATION`／`ACCESS_COARSE_LOCATION`）。APK 的 `targetSdkVersion` 為 36，所以 Android 13+ 上前景服務的常駐通知會被靜默擋掉。
@@ -39,7 +39,7 @@ dumpsys activity services …
 
 **建議**：在 `start` 流程裡，於請求定位權限的同一條路徑上請求 `POST_NOTIFICATIONS`（Android 13+ 才需要）。被拒絕時不要阻止記錄，但要在診斷畫面明確標示「常駐通知已被關閉」。
 
-**Codex 處理**：開始流程現在會同時請求缺少的定位與通知權限；通知被拒絕時仍啟動記錄。原生 status 回報通知權限，Flutter 的「Android 背景執行準備」區塊會顯示結果。自動測試與 APK 建置通過，尚未在真機點過新權限流程。
+**Codex 處理**：開始流程現在會同時請求缺少的定位與通知權限；通知被拒絕時仍啟動記錄。原生 status 回報通知權限，Flutter 的「Android 背景執行準備」區塊會顯示結果。2026-10-05 以新安裝的 PR #8 APK 實測，開始記錄時定位與通知權限均由未授予變成已授予；服務為 `isForeground=true`，`dumpsys notification` 可查到 `roadscope_recording` 的實際 NotificationRecord，並非只有建立 channel。
 
 ---
 
@@ -85,7 +85,7 @@ dumpsys activity services …
 ## H4 · 廠商省電權限需要引導（小米實測為必要條件）
 
 - **擁有者路徑**：`apps/mobile/`（引導畫面）；產品決策屬使用者
-- **狀態**：已實作，待 Android 真機驗證（`mobile/diagnostics-followups`）
+- **狀態**：已解決（PR #8；2026-10-05 Android 真機驗證）
 - **為什麼不在本次範圍**：引導流程是產品與 UI 工作。
 
 Xiaomi 21081111RG／Android 14／MIUI V816 實測，**自啟動關閉時程序一死採集就永久結束**：
@@ -101,21 +101,21 @@ Xiaomi 21081111RG／Android 14／MIUI V816 實測，**自啟動關閉時程序�
 
 **建議**：在開始長時間記錄前偵測並引導使用者開啟（至少小米／OPPO／vivo／華為）。沒有引導的話，「背景採集穩定」在這些機型上不成立。
 
-**Codex 處理**：診斷畫面會顯示廠牌、通知權限與 Android 公開的電池最佳化排除狀態，並提供 App 權限與電池最佳化設定入口。小米／OPPO／vivo／華為等廠牌另顯示人工設定說明。廠商自啟動開關沒有穩定公開 API，因此明確標為無法可靠讀取；程式不會假裝已開啟。
+**Codex 處理**：診斷畫面會顯示廠牌、通知權限與 Android 公開的電池最佳化排除狀態，並提供 App 權限與電池最佳化設定入口。小米／OPPO／vivo／華為等廠牌另顯示人工設定說明。2026-10-05 真機確認兩個入口分別開啟 Android App 詳細設定與 MIUI 電池設定；將 RoadScope 設為不受限制並返回 App 後，畫面刷新為「常駐通知權限：已允許」與「電池最佳化：已排除」，`dumpsys deviceidle whitelist` 也包含套件。`MIUIOP(10008)` 仍為 `ignore`，證實 App 無法可靠讀取或代替使用者開啟小米自啟動權限，人工引導仍是必要資訊。
 
 ---
 
 ## H5 · 分不出「task 被滑掉」與「切到背景」
 
 - **擁有者路徑**：`packages/device_bridge/android/`
-- **狀態**：已實作，待 Android 真機驗證（`mobile/diagnostics-followups`）
+- **狀態**：已解決（PR #8；2026-10-05 Android 真機驗證）
 - **為什麼不在本次範圍**：這是新增原生生命週期觀測點，不只是補一個 telemetry 欄位。範圍小，若使用者指定，Claude Code 也可以做。
 
 從近期工作清單滑掉 App 與按 Home 都只產生一次 `appLifecycle: background`，telemetry 無法區分。實測 2026-10-03T22:18:28Z 的 `background` 無法判定是哪一種操作。
 
 **建議**：在 `LocationRecorderService` 實作 `onTaskRemoved()`，寫一筆 trigger（例如 `task_removed`）。新增 trigger 已有向前相容規則（未知 trigger 是警告並保留），`docs/diagnostics-telemetry.md` §4 的欄位集合不需要變，但三端的 trigger 清單要同步。
 
-**Codex 處理**：Android `Service.onTaskRemoved()` 現在寫入 `task_removed`，記錄服務不會因此停止；Kotlin、Swift、Dart 的 trigger 清單與 UI 標籤已同步。自動測試確認狀態沒有變時仍會寫入，真機尚待從近期工作清單滑掉 App 驗證。
+**Codex 處理**：Android `Service.onTaskRemoved()` 現在寫入 `task_removed`，記錄服務不會因此停止；Kotlin、Swift、Dart 的 trigger 清單與 UI 標籤已同步。2026-10-05 由使用者實際從近期工作清單滑掉 App 後，telemetry 寫入唯一一筆 `task_removed`（sequence 12）；前景服務仍為 `isForeground=true`、`startRequested=true`。重新開啟 App 後可正常停止。該次 telemetry 共 15 列、0 bad lines，trigger 為 `recording_started` 1、`state_change` 10、`heartbeat` 2、`task_removed` 1、`recording_stopped` 1。
 
 ---
 

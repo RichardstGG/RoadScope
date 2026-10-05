@@ -232,7 +232,9 @@ dart run bin/inspect_telemetry.dart /absolute/path/to/exported.telemetry.ndjson
 - 兩種格式分開匯出，分享文字各自正確
 - keyguard 時序可量測：該機關螢幕時 keyguard 鎖定延遲 0 ms（兩次採集一致）。亮屏到解鎖之間的「螢幕亮著且鎖定」狀態**取決於解鎖方式**：密碼解鎖時為 3.886 秒並寫成獨立一列，生物辨識解鎖時完全沒有出現
 - `appLifecycle` 初始值修復後實測：第一列即為 `foreground`，一次 4 分鐘採集的 8 列全部有真實值、`app_lifecycle_unknown` 旗標 0 次；**畫面也確認顯示「前景」**
-- 授予 `POST_NOTIFICATIONS` 後**常駐通知在畫面上確實可見**（使用者目視確認）。Android 13+ 的開始流程現在會在執行期請求該權限；拒絕不會阻止記錄，但診斷畫面會顯示警告。此新流程仍待真機驗證。
+- **Android 13+ 通知權限流程**：2026-10-05 以全新安裝的 PR #8 APK 開始記錄，定位與 `POST_NOTIFICATIONS` 都由未授予變成已授予；服務為 `isForeground=true`，`dumpsys notification` 可查到 `roadscope_recording` 的實際 NotificationRecord。拒絕通知不會阻止記錄，診斷畫面會顯示權限狀態。
+- **背景執行設定引導**：App 詳細設定與電池設定兩個入口均在小米真機開到正確系統頁；排除電池最佳化並返回後，畫面與 `dumpsys deviceidle whitelist` 都反映新狀態。小米自啟動 appop 仍為 `ignore`，符合 UI 明示「無法可靠讀取、需人工確認」的設計。
+- **近期工作清單滑除**：使用者實際滑掉 App 後寫出唯一一筆 `task_removed`（telemetry sequence 12），前景服務仍為 `isForeground=true`、`startRequested=true`；重新開啟後可正常停止。該次 telemetry 15 列、0 bad lines。
 - `recording_interrupted` 端對端實測：記錄中被終止後按停止，補寫的那一列 `locationLogLastSequence` 等於紀錄中實際最後一筆樣本序號，裝置欄位全部不可得，location-log 未被加入任何事件
 - 戶外 4 分鐘採集：245 筆樣本零缺口、間隔中位 1.000 秒、無 >5 秒空窗、水平精度中位 1.6 公尺、品質旗標 0 筆；鎖屏 73.7 秒期間 74 筆樣本未中斷
 - **201 分鐘連續採集（長時間驗收）**：12063 筆樣本、序號零缺口、間隔 median／p95／p99 皆 1.000 秒、**max 1.500 秒、沒有任何 >2 秒的空窗**；水平精度中位 2.1 公尺、品質旗標 0 筆；事件只有 `recording_started`（無截斷、無校時、無恢復）；location-log 6.82 MiB ≈ 2.0 MiB／小時
