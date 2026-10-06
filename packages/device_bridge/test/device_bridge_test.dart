@@ -61,6 +61,22 @@ void main() {
     expect(calls, ['openAppSettings', 'openBatteryOptimizationSettings']);
   });
 
+  test('lean control is an explicit native action and motion status is a small map', () async {
+    final calls = <MethodCall>[];
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      calls.add(call);
+      if (call.method == 'motionStatus') {
+        return {'leanAngleDeg': null, 'leanState': 'unavailable'};
+      }
+      return null;
+    });
+    const bridge = DeviceBridge();
+    expect((await bridge.motionStatus())['leanAngleDeg'], isNull);
+    await bridge.leanCalibration('upright');
+    expect(calls.last.method, 'leanCalibration');
+    expect(calls.last.arguments, {'action': 'upright'});
+  });
+
   test('interrupted and resuming states have explicit control semantics', () {
     const interrupted = RecorderStatus(state: 'interrupted');
     const resuming = RecorderStatus(state: 'resuming');

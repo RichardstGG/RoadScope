@@ -16,18 +16,28 @@ class _MotionReadinessState extends State<MotionReadiness> {
   late final Future<Map<String, Object?>> _capabilities = const DeviceBridge()
       .motionCapabilities();
   Timer? _timer;
+  StreamSubscription<Map<String, Object?>>? _updates;
   Map<String, Object?> _status = const {};
   bool _reading = false;
   @override
   void initState() {
     super.initState();
     _refresh();
+    _updates = const DeviceBridge().motionUpdates.listen(
+      (value) {
+        if (mounted) setState(() => _status = value);
+      },
+      onError: (Object _) {
+        /* iOS/older plugin: status remains explicit. */
+      },
+    );
     _timer = Timer.periodic(const Duration(seconds: 1), (_) => _refresh());
   }
 
   @override
   void dispose() {
     _timer?.cancel();
+    _updates?.cancel();
     super.dispose();
   }
 
@@ -44,14 +54,16 @@ class _MotionReadinessState extends State<MotionReadiness> {
     }
   }
 
-  Future<void> _export() async {
-    final path = _status['path'];
+  Future<void> _export(String key) async {
+    final path = _status[key];
     if (path is! String || _status['state'] != 'idle') return;
     try {
       await SharePlus.instance.share(
         ShareParams(
           files: [XFile(path)],
-          text: 'RoadScope motion v1 原始感測資料（不是定位紀錄）',
+          text: key == 'path'
+              ? 'RoadScope motion v1 原始感測資料'
+              : 'RoadScope lean v1 實驗性傾角紀錄',
         ),
       );
     } catch (error) {
@@ -61,6 +73,33 @@ class _MotionReadinessState extends State<MotionReadiness> {
       }
     }
   }
+
+  bool _controlling = false;
+  Future<void> _calibrate(String action) async {
+    setState(() => _controlling = true);
+    try {
+      await const DeviceBridge().leanCalibration(action);
+      await _refresh();
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('$error')));
+      }
+    } finally {
+      if (mounted) setState(() => _controlling = false);
+    }
+  }
+
+  String _angle(Object? value) =>
+      value is num ? '${value.toStringAsFixed(1)}°' : '—';
+
+  String get _calibrationState => switch (_status['calibrationState']) {
+    'collecting_upright' => '直立靜止收集中',
+    'awaiting_left' => '直立完成，請安全左傾並確認',
+    'collecting_left' => '左傾靜止收集中',
+    'calibrated' => '已校準',
+    _ => '尚未啟動流程',
+  };
 
   String _available(Object? value) => switch (value) {
     true => '可用',
@@ -74,8 +113,44 @@ class _MotionReadinessState extends State<MotionReadiness> {
     children: [
       const Divider(height: 32),
       Text('傾角開發診斷', style: Theme.of(context).textTheme.titleMedium),
-      const Text('傾角 — · 最大左傾 — · 最大右傾 —'),
-      const Text('原始感測資料隨定位錄製；傾角估算與校準尚未啟用。'),
+      Text(
+        '傾角 ${_angle(_status['leanAngleDeg'])} · 最大左傾 ${_angle(_status['maxLeft'])} · 最大右傾 ${_angle(_status['maxRight'])}',
+      ),
+      const Text('實驗性估算：負值左傾、正值右傾，尚未驗證道路準確度。品質不合格不計最大值。'),
+      Text('校準：$_calibrationState · 品質：${_status['leanFlags'] ?? '—'}'),
+      if (_status['calibrationProgress'] case final num progress)
+        LinearProgressIndicator(value: progress.toDouble()),
+      const Text(
+        '僅停車且安全支撐時操作：保持車輛直立、前輪朝前，按直立並靜止 3 秒；再安全向左傾 5–25°，按左傾確認並靜止 3 秒。改變安裝或重開機／續錄後重新校準。',
+      ),
+      const Text('自動直立參考尚未啟用；未完成手動校準時不顯示角度。'),
+      Wrap(
+        spacing: 8,
+        children: [
+          OutlinedButton(
+            onPressed:
+                !_controlling &&
+                    _status['state'] == 'recording' &&
+                    _status['leanState'] == 'available'
+                ? () => _calibrate('upright')
+                : null,
+            child: const Text('直立校準'),
+          ),
+          OutlinedButton(
+            onPressed:
+                !_controlling && _status['calibrationState'] == 'awaiting_left'
+                ? () => _calibrate('left')
+                : null,
+            child: const Text('左傾確認'),
+          ),
+          TextButton(
+            onPressed: !_controlling && _status['state'] == 'recording'
+                ? () => _calibrate('cancel')
+                : null,
+            child: const Text('取消校準流程'),
+          ),
+        ],
+      ),
       Text('感測採集：${_status['state'] ?? '讀取中'}'),
       if (_status['counts'] case final Map counts) Text('已寫入樣本：$counts'),
       if (_status['clockStates'] case final Map clocks) Text('時鐘驗證：$clocks'),
@@ -100,9 +175,15 @@ class _MotionReadinessState extends State<MotionReadiness> {
       ),
       OutlinedButton(
         onPressed: _status['state'] == 'idle' && _status['path'] is String
-            ? _export
+            ? () => _export('path')
             : null,
         child: const Text('匯出 motion v1'),
+      ),
+      OutlinedButton(
+        onPressed: _status['state'] == 'idle' && _status['leanPath'] is String
+            ? () => _export('leanPath')
+            : null,
+        child: const Text('匯出 lean v1'),
       ),
       const Text('感測時鐘未驗證時，測量時間為空值，不能用於精準 GPS 對時。'),
     ],

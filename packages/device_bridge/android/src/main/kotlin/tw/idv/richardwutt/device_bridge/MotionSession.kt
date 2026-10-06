@@ -27,6 +27,13 @@ internal class MotionSession(private val context: Context, private val id: Strin
         fun unavailable(id: String, error: String?) {
             generations.incrementAndGet()
             latest = mapOf("state" to "error", "recordingId" to id, "error" to error)
+            MotionUpdates.publish(latest)
+        }
+        @Volatile private var current: MotionSession? = null
+        fun control(action: String, reply: (Exception?) -> Unit) {
+            val session = current
+            if (session == null) reply(IllegalStateException("Start recording before calibrating"))
+            else session.controlOnWriter(action, reply)
         }
     }
     private val generation = generations.incrementAndGet()
@@ -48,6 +55,10 @@ internal class MotionSession(private val context: Context, private val id: Strin
     private lateinit var writerHandler: Handler
     private val writer = MotionLogWriter(File(File(context.filesDir, "motion"), "$id.motion.ndjson"),
         id, version, boot, anchor, sources)
+    private val lean = LeanLogWriter(File(File(context.filesDir, "motion"), "$id.lean.ndjson"),
+        id, boot, version, sources.map { it.id }, { writer.counts }, { writer.sync(it) })
+    private val pipeline = LeanPipeline(lean, sources)
+    private val controlPending = AtomicBoolean(false)
     private data class Packet(val source: MotionSource, val measured: Long, val received: Long,
         val uptime: Long, val utc: Long, val accuracy: String?, val values: DoubleArray,
         val droppedBefore: Long, val invalidBefore: Long)
@@ -66,8 +77,10 @@ internal class MotionSession(private val context: Context, private val id: Strin
 
     fun start() {
         latest = mapOf("state" to "starting", "recordingId" to id)
+        MotionUpdates.publish(latest)
         writerThread.start(); writerHandler = Handler(writerThread.looper)
         sensorThread.start(); sensorHandler = Handler(sensorThread.looper)
+        current = this
         writerHandler.post {
             try {
                 fileOwner.acquire(); ownsFile = true
@@ -75,6 +88,8 @@ internal class MotionSession(private val context: Context, private val id: Strin
                 val mono = SystemClock.elapsedRealtimeNanos() / 1000
                 val utc = System.currentTimeMillis()
                 writer.start(utc, mono)
+                lean.start(utc, mono)
+                watchInputs()
                 offsetUs = utc * 1000 - mono
                 publish("recording")
                 sensorHandler.post {
@@ -127,17 +142,45 @@ internal class MotionSession(private val context: Context, private val id: Strin
     private fun scheduleDrain() {
         if (draining.compareAndSet(false, true)) writerHandler.post { drain() }
     }
+    private fun watchInputs() {
+        writerHandler.postDelayed({
+            if (stopping.get() || failed) return@postDelayed
+            try {
+                if (buffer.isEmpty() && pipeline.expire(SystemClock.elapsedRealtimeNanos() / 1000,
+                        System.currentTimeMillis())) publish("recording")
+                lean.syncIfDue(SystemClock.elapsedRealtimeNanos() / 1000)
+                watchInputs()
+            } catch (error: Exception) { fail(error) }
+        }, 250)
+    }
+    private fun controlOnWriter(action: String, reply: (Exception?) -> Unit) {
+        if (stopping.get() || failed || !controlPending.compareAndSet(false, true)) {
+            reply(IllegalStateException("Motion recorder unavailable or control pending")); return
+        }
+        if (!writerHandler.post {
+            try {
+                check(!stopping.get() && !failed) { "Motion recorder stopped" }
+                pipeline.control(action); publish("recording"); reply(null)
+            } catch (error: Exception) { reply(error) }
+            finally { controlPending.set(false) }
+        }) { controlPending.set(false); reply(IllegalStateException("Motion writer closed")) }
+    }
     private fun drain() {
         try {
             var processed = 0
             while (!failed && processed++ < 256) {
                 val packet = buffer.poll() ?: break
+                if (packet.droppedBefore > 0 || packet.invalidBefore > 0)
+                    pipeline.interrupted("after_input_gap", packet.utc, packet.received)
                 if (packet.droppedBefore > 0) writer.dropped(packet.source.id,
                     packet.droppedBefore, null, null, "buffer_full", packet.utc, packet.received)
                 if (packet.invalidBefore > 0) writer.dropped(packet.source.id,
                     packet.invalidBefore, null, null, "sensor_interrupted", packet.utc, packet.received)
                 val verified = probes.getValue(packet.source.id).observe(packet.measured, packet.received, packet.uptime)
+                val oldClock = writer.clockStates[packet.source.id]
                 writer.clock(packet.source.id, verified, packet.utc, packet.received)
+                if (oldClock != writer.clockStates[packet.source.id])
+                    pipeline.interrupted("input_clock_state_change", packet.utc, packet.received)
                 // UTC mapping drift is separate from the shared boot decision.
                 // If wall clock changes, emit a fresh map without rewriting rows.
                 if (packet.received - checkedMapUs >= 1_000_000) {
@@ -150,8 +193,12 @@ internal class MotionSession(private val context: Context, private val id: Strin
                     }
                     checkedMapUs = packet.received
                 }
-                writer.sample(packet.source, if (verified) packet.measured else null,
+                val sequence = writer.sample(packet.source, if (verified) packet.measured else null,
                     packet.received, packet.utc, packet.accuracy, packet.values)
+                // Only a successful raw append may reach the estimator.
+                pipeline.consume(packet.source, sequence, if (verified) packet.measured else null,
+                    packet.received, packet.utc, packet.values, writer.currentMapId,
+                    SystemClock.elapsedRealtimeNanos() / 1000, packet.accuracy)
                 if (packet.received - publishedUs >= 100_000) { publish("recording"); publishedUs = packet.received }
             }
         } catch (error: Exception) { fail(error) }
@@ -165,13 +212,17 @@ internal class MotionSession(private val context: Context, private val id: Strin
         if (generation != generations.get()) return
         latest = mapOf("state" to state, "recordingId" to id, "counts" to writer.counts,
             "clockStates" to writer.clockStates, "error" to error,
-            "path" to File(File(context.filesDir, "motion"), "$id.motion.ndjson").absolutePath)
+            "path" to File(File(context.filesDir, "motion"), "$id.motion.ndjson").absolutePath,
+            "leanPath" to File(File(context.filesDir, "motion"), "$id.lean.ndjson").absolutePath) + pipeline.snapshot
+        MotionUpdates.publish(latest)
     }
     private fun fail(error: Exception) {
         failed = true
         // Can be called on sensor looper; do not touch writer state off its owner.
         sensorHandler.post { manager.unregisterListener(this) }
         writerHandler.post {
+            try { pipeline.interrupted("raw_write_failure", System.currentTimeMillis(),
+                SystemClock.elapsedRealtimeNanos() / 1000) } catch (_: Exception) { /* Keep original failure. */ }
             publish("error", error.message)
             closeWriter()
             stop()
@@ -179,6 +230,7 @@ internal class MotionSession(private val context: Context, private val id: Strin
     }
     fun stop(reason: String? = null) {
         if (!stopping.compareAndSet(false, true)) return
+        if (current === this) current = null
         sensorHandler.post {
             manager.unregisterListener(this)
             val drops = pendingDrops.toMap()
@@ -193,6 +245,8 @@ internal class MotionSession(private val context: Context, private val id: Strin
                             "buffer_full", System.currentTimeMillis(), SystemClock.elapsedRealtimeNanos() / 1000) }
                         invalid.forEach { (source, count) -> writer.dropped(source, count, null, null,
                             "sensor_interrupted", System.currentTimeMillis(), SystemClock.elapsedRealtimeNanos() / 1000) }
+                        pipeline.stopped(SystemClock.elapsedRealtimeNanos() / 1000,
+                            if (reason == null) "recording_stopped" else "recording_interrupted")
                         closeWriter()
                         if (!failed) publish(if (reason == null) "idle" else "error", reason)
                     }
@@ -205,6 +259,9 @@ internal class MotionSession(private val context: Context, private val id: Strin
         }
     }
     private fun closeWriter() {
+        try { lean.close() } catch (error: Exception) {
+            failed = true; publish("error", error.message)
+        }
         try { writer.close() } catch (error: Exception) {
             failed = true; publish("error", error.message)
         } finally {

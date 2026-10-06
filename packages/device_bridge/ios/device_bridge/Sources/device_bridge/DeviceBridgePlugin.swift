@@ -55,6 +55,8 @@ public class DeviceBridgePlugin: NSObject, FlutterPlugin, CLLocationManagerDeleg
       result(["platform": "ios", "leanRecordingAvailable": false])
     case "motionStatus":
       result(["state": "unavailable"])
+    case "leanCalibration":
+      result(FlutterError(code: "calibration_unavailable", message: "Android experimental feature; iOS not implemented", details: nil))
     case "start":
       startRequestedInThisProcess = true
       if !defaults.bool(forKey: "roadscope.active") {

@@ -4,7 +4,8 @@
 
 開發基準為尚未合併的 [PR #10](https://github.com/RichardstGG/RoadScope/pull/10)
 `747493332c2dd59044a425508387b3b4d31ab24e`。不修改 location-log v1。
-新增 motionCapabilities／motionStatus 方法；舊 plugin 方法不存在時顯示不可用。
+新增 motionCapabilities／motionStatus／leanCalibration 方法及 device_bridge/motion
+EventChannel；舊 plugin 方法不存在時顯示不可用。
 iOS 僅能力與 unavailable 回報，未實作採集。
 
 Android 定位服務管理獨立 motion session：加速度、角速度、姿態要求各 50 Hz，
@@ -25,32 +26,58 @@ GPS 不因此停止。約 180 MB/h 只是契約 fixture 粗估，待真機量測
 定位 boot authority 改變時停止 motion，要求重新開始，不默默串接時域。
 
 UI 顯示能力、樣本數、時鐘狀態、錯誤與車把轉向誤差提示。
-狀態取自記憶體小快照，不讀完整高頻檔案。正常停止後可主動分享 motion。
-傾角仍顯示尚未啟用，沒有假角度。
+狀態取自記憶體小快照，不讀完整高頻檔案。正常停止後可主動分開分享 motion／lean。
+EventChannel 最多 10 Hz 發布已寫出的估算，main looper 只留一個待送快照。
+超過 500 ms 的舊角度隱藏；IO watchdog 每 250 ms 檢查靜默中斷並記 unavailable。
 
-## 傾角核心與下一步
+## 實驗性傾角與校準
 
 純 Kotlin 幾何核心包含 3 秒靜止直立窗口、額外左傾方向確認、任意安裝
 座標左右傾角投影。必須輸入 world-up 在 device axes 中的向量，
-不能直接把過彎 accelerometer 當直立方向。尚未接入 service。
+不能直接把過彎 accelerometer 當直立方向。已接入 service：按直立收集 3 秒，
+再安全左傾 5–25 度確認並靜止 3 秒。僅停車安全支撐、前輪朝前時操作。
+窗口不合格會重算；取消流程不刪除既有有效校準。
+校準保存 sourceRange、實際窗口 spread 及左傾證據；生效時間晚於所有證據與舊估算。
 
-純記憶體分段最大值以連續至少 100 ms 同側窗口的最小絕對角度作保守峰值，
+lean writer 分段最大值以連續至少 100 ms 同側窗口的最小絕對角度作保守峰值，
 保存來源時間；重校準保存前段，無效值、跨 boot、逆序或 >100 ms 缺口
 清除窗口。規則尚需動態參考比較，不代表真實最大傾角準確度。
 
-下一步接估算／校準狀態機：不可用停估算，恢復建立新 filterEpoch；
-raw 成功落盤後才准引用，raw 寫入失敗重設 epoch；重校準與跨 boot
-最大值從 null 開始。精準 GPS 對時須兩邊來源該時段都已驗證。
+融合起始版為 gyro-rest-up-experimental-v1：平台 quaternion 初始化 world-up，
+gyro Rodrigues 積分；只有 rest-like 輸入才以每筆 1% 慢速修正至平台姿態。
+rest-like 是 gyro ≤0.035 rad/s、比力量值距 g ≤0.4 m/s² 的工程判斷，
+不證明車輛停住；長緩彎可能誤判、gyro 會漂移、平台姿態可能被動態污染。
+尚不具有道路準確度保證。比力量值距 g >2 m/s² 時帶 dynamic_acceleration_high，
+缺口後 1 秒帶 after_input_gap，兩者都不計最大值。
+來源 accuracy 為 unreliable 或不可得時停估算；平台若不報有效 accuracy，
+本版可能保持 unavailable，須真機確認，不為讓畫面出值而放寬。
+
+只有成功寫出 raw 的輸入才能進融合；最多 20 Hz 写估算，measurement 時刻為
+最新引用輸入的測量時間，不是 UI／接收時間。null 時鐘完全不寫估算。
+缺樣／時鐘狀態／中斷清除輸入與濾波，恢復用新 filterEpoch；缺口後重新收斂。
+raw 寫入失敗停止整個 motion，未寫出的輸入根本未消費；續錄開 recovery epoch。
+
+lean fsync 前先做 raw fsync；正常停止亦同。不宣稱跨檔原子性或斷電零遺失。
+lean 恢復以串流掃描做序號與 raw 引用上界檢查；發現缺少 raw 引用時保留原檔、
+拒絕續錄，連部分尾行也不修掉。這不是取代完整配對驗證器。
+恢復結案前段保留最大值。同 boot 的程序續錄也採保守重新校準，跨 boot 不沿用；
+重校準與新 boot 的分段最大值從 null 開始。
+精準 GPS 對時仍須兩邊來源該時段都已驗證，不代表角度準確度。
+
+下一步是 GPS 品質／速度／轉向／震動閘門的時間加權自動直立參考。
+本版未啟用自動參考，沒有軸確認時保持未知，UI 已明示。
 
 ## 驗證界線
 
 - automated：writer 時鐘狀態、序號、尾行修復、跨 boot、IO 失敗、
-  缺樣、有界 buffer，以及合成向量幾何與最大值窗口。
-  原生合成輸出交 PR #10 同版驗證器檢查，CI 固定契約 SHA。
+  缺樣、有界 buffer、合成幾何、手動校準、估算與峰值來源、品質閘門、
+  重校準、lean 尾行修復、跨 boot、dangling raw 拒絕及 fsync barrier 呼叫。
+  原生 motion／lean 合成輸出交 PR #10 同版驗證器逐檔及配對檢查，CI 固定契約 SHA。
 - static：Dart UI 分析、原生採集生命週期整合及 Android 建置。
 - manual / hardware：本版未測；background、頻率、時鐘驗證比例、
   低儲存量、實際 MB/h 與耗電待測。之前 GPS 長測不是本版證據。
-- untested：動態融合、校準 UI／持久化、自動參考、lean 檔、
-  raw→lean 寫入順序、跨檔崩潰恢復／配對驗證、傾角 EventChannel、iOS runtime。
+- untested：實際動態融合準確度／漂移、停車校準操作、EventChannel 背景生命週期、
+  真正程序死亡／斷電的双檔耐久性、Android OEM accuracy、iOS runtime。
+  自動參考、事後完整重播比較尚未實作；合成配對通過不是完整重播證據。
 
 Android V1.0 基礎功能與 UI 真機通過前，不安排 iOS 真機測試。

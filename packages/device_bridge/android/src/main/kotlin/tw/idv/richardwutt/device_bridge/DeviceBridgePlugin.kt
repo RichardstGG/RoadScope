@@ -14,6 +14,7 @@ import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.PluginRegistry
 
 internal fun requiredRecordingPermissions(
@@ -31,6 +32,8 @@ internal fun requiredRecordingPermissions(
 class DeviceBridgePlugin : FlutterPlugin, MethodChannel.MethodCallHandler, ActivityAware,
     PluginRegistry.RequestPermissionsResultListener {
     private lateinit var channel: MethodChannel
+    private lateinit var motionChannel: EventChannel
+    private var motionSink: EventChannel.EventSink? = null
     private lateinit var context: Context
     private var activity: Activity? = null
     private var activityBinding: ActivityPluginBinding? = null
@@ -40,12 +43,27 @@ class DeviceBridgePlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Activ
         context = binding.applicationContext
         channel = MethodChannel(binding.binaryMessenger, "device_bridge")
         channel.setMethodCallHandler(this)
+        motionChannel = EventChannel(binding.binaryMessenger, "device_bridge/motion")
+        motionChannel.setStreamHandler(object : EventChannel.StreamHandler {
+            override fun onListen(arguments: Any?, events: EventChannel.EventSink) {
+                motionSink = events; MotionUpdates.attach(events)
+            }
+            override fun onCancel(arguments: Any?) {
+                MotionUpdates.detach(motionSink); motionSink = null
+            }
+        })
     }
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
             "motionCapabilities" -> result.success(motionCapabilities(context))
             "motionStatus" -> result.success(LocationRecorderService.motionStatus(context))
+            "leanCalibration" -> MotionSession.control(call.argument<String>("action") ?: "") { error ->
+                Handler(Looper.getMainLooper()).post {
+                    if (error == null) result.success(null)
+                    else result.error("calibration_unavailable", error.message, null)
+                }
+            }
             "start" -> start(result)
             "stop" -> {
                 context.startService(Intent(context, LocationRecorderService::class.java).apply {
@@ -160,5 +178,7 @@ class DeviceBridgePlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Activ
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         channel.setMethodCallHandler(null)
+        motionChannel.setStreamHandler(null)
+        MotionUpdates.detach(motionSink); motionSink = null
     }
 }

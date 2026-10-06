@@ -15,6 +15,7 @@ internal fun motionCapabilities(context: Context): Map<String, Any?> {
         "rotationVector" to present(Sensor.TYPE_ROTATION_VECTOR),
         "gameRotationVector" to present(Sensor.TYPE_GAME_ROTATION_VECTOR),
         "measurementClock" to "elapsed_realtime_nanos",
-        "leanRecordingAvailable" to false,
+        "leanRecordingAvailable" to (present(Sensor.TYPE_ACCELEROMETER) && present(Sensor.TYPE_GYROSCOPE) &&
+            (present(Sensor.TYPE_GAME_ROTATION_VECTOR) || present(Sensor.TYPE_ROTATION_VECTOR))),
     )
 }

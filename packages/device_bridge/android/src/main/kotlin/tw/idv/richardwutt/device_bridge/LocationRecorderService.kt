@@ -108,9 +108,12 @@ class LocationRecorderService : Service(), LocationListener {
             val id = prefs(context).getString("latestId", null)
             val file = id?.let { File(File(context.filesDir, "motion"), "$it.motion.ndjson") }
             val latest = MotionSession.latest
-            return if (latest["recordingId"] == id) latest else mapOf(
+            val snapshot = motionSnapshotAt(latest, SystemClock.elapsedRealtimeNanos() / 1000)
+            return if (snapshot["recordingId"] == id) snapshot else mapOf(
                 "state" to "idle", "recordingId" to id,
-                "path" to file?.takeIf { it.exists() }?.absolutePath)
+                "path" to file?.takeIf { it.exists() }?.absolutePath,
+                "leanPath" to id?.let { File(File(context.filesDir, "motion"), "$it.lean.ndjson") }
+                    ?.takeIf { it.exists() }?.absolutePath)
         }
 
         private fun read(context: Context, pick: (Context) -> File?,

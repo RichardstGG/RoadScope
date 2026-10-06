@@ -19,7 +19,16 @@ class DeviceBridge {
       const {};
 
   Future<Map<String, Object?>> motionStatus() async =>
-      await _channel.invokeMapMethod<String, Object?>('motionStatus') ?? const {};
+      await _channel.invokeMapMethod<String, Object?>('motionStatus') ??
+      const {};
+
+  static const _motionChannel = EventChannel('device_bridge/motion');
+  static final Stream<Map<String, Object?>> _motionUpdates = _motionChannel
+      .receiveBroadcastStream()
+      .map((value) => Map<String, Object?>.from(value as Map));
+  Stream<Map<String, Object?>> get motionUpdates => _motionUpdates;
+  Future<void> leanCalibration(String action) =>
+      _channel.invokeMethod<void>('leanCalibration', {'action': action});
 
   Future<RecorderStatus> status() async {
     final raw = await _channel.invokeMapMethod<String, Object?>('status');

@@ -59,6 +59,7 @@ internal class MotionLogWriter(
     private val clocks = mutableMapOf<String, String>()
     private val lastMeasurement = mutableMapOf<String, Long>()
     private var mapId = -1
+    val currentMapId: Int get() = mapId
     private var failed = false
     private var lastSyncUs = 0L
     val counts: Map<String, Long> get() = next.toMap()

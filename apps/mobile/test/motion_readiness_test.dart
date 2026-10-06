@@ -12,7 +12,7 @@ void main() {
   });
 
   testWidgets(
-    'inventory does not claim lean recording and does not subscribe',
+    'unavailable sensors do not show numeric angles or start recording',
     (tester) async {
       final calls = <String>[];
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -30,7 +30,8 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.textContaining('陀螺儀：未提供'), findsOneWidget);
-      expect(find.textContaining('傾角估算與校準尚未啟用'), findsOneWidget);
+      expect(find.textContaining('尚未驗證道路準確度'), findsOneWidget);
+      expect(find.textContaining('傾角 —'), findsOneWidget);
       expect(find.textContaining('固定於車把'), findsOneWidget);
       expect(calls, containsAll(['motionCapabilities', 'motionStatus']));
       expect(calls, isNot(contains('start')));
@@ -52,4 +53,59 @@ void main() {
     expect(find.text('無法讀取感測器能力'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets(
+    'calibration controls use native state and display persisted estimates',
+    (tester) async {
+      final calls = <MethodCall>[];
+      var status = <String, Object?>{
+        'state': 'recording',
+        'leanState': 'available',
+        'calibrationState': 'idle',
+        'leanAngleDeg': -12.5,
+        'maxLeft': 11.0,
+        'maxRight': null,
+      };
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            calls.add(call);
+            if (call.method == 'motionStatus') return status;
+            if (call.method == 'leanCalibration') {
+              status = {...status, 'calibrationState': 'awaiting_left'};
+              return null;
+            }
+            return <String, Object?>{};
+          });
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(body: SingleChildScrollView(child: MotionReadiness())),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining('傾角 -12.5° · 最大左傾 11.0° · 最大右傾 —'),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .widget<OutlinedButton>(find.widgetWithText(OutlinedButton, '左傾確認'))
+            .onPressed,
+        isNull,
+      );
+      await tester.tap(find.text('直立校準'));
+      await tester.pumpAndSettle();
+      expect(
+        calls.where((c) => c.method == 'leanCalibration').single.arguments,
+        {'action': 'upright'},
+      );
+      expect(
+        tester
+            .widget<OutlinedButton>(find.widgetWithText(OutlinedButton, '左傾確認'))
+            .onPressed,
+        isNotNull,
+      );
+      expect(find.textContaining('直立完成，請安全左傾並確認'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
 }

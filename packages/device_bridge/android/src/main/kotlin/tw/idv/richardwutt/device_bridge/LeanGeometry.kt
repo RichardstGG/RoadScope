@@ -10,6 +10,8 @@ internal data class LeanVector(val x: Double, val y: Double, val z: Double) {
     operator fun minus(b: LeanVector) = LeanVector(x - b.x, y - b.y, z - b.z)
     operator fun times(k: Double) = LeanVector(x * k, y * k, z * k)
     fun dot(b: LeanVector) = x * b.x + y * b.y + z * b.z
+    fun cross(b: LeanVector) = LeanVector(y * b.z - z * b.y, z * b.x - x * b.z, x * b.y - y * b.x)
+    fun norm() = sqrt(dot(this))
     fun unit(): LeanVector? {
         val n = sqrt(dot(this))
         return if (!n.isFinite() || n < 1e-9) null else this * (1 / n)
@@ -17,6 +19,7 @@ internal data class LeanVector(val x: Double, val y: Double, val z: Double) {
 }
 
 internal data class LeanMount(val upright: LeanVector, val right: LeanVector) {
+    val axis: LeanVector get() = right.cross(upright).unit()!!
     /** Positive = right lean, negative = left lean. Pitch is projected out.
      * Near the forward-axis singularity or upside down, return unavailable. */
     fun angle(upInDevice: LeanVector): Double? {
@@ -44,6 +47,10 @@ internal data class LeanMount(val upright: LeanVector, val right: LeanVector) {
 /** Three seconds of contiguous stationary observations, sensor time in us.
  * Rejected/gapped data resets the window; sparse callbacks cannot qualify. */
 internal class UprightWindow {
+    val startUs: Long? get() = start
+    val lastUs: Long? get() = previous
+    var spreadDeg = 0.0
+        private set
     private var start: Long? = null
     private var previous: Long? = null
     private var anchor: LeanVector? = null
@@ -52,6 +59,7 @@ internal class UprightWindow {
     fun reset() {
         start = null; previous = null; anchor = null
         sum = LeanVector(0.0, 0.0, 0.0)
+        spreadDeg = 0.0
     }
 
     fun add(timeUs: Long, up: LeanVector, gyroRadS: Double, accelerationMps2: Double): LeanVector? {
@@ -66,6 +74,7 @@ internal class UprightWindow {
         val reference = anchor
         if (reference != null && reference.dot(unit) < cos(Math.toRadians(1.5))) reset()
         if (start == null) { start = timeUs; anchor = unit }
+        spreadDeg = maxOf(spreadDeg, Math.toDegrees(acos(anchor!!.dot(unit).coerceIn(-1.0, 1.0))))
         previous = timeUs
         sum += unit
         return if (timeUs - start!! >= 3_000_000) sum.unit() else null
