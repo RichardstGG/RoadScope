@@ -103,6 +103,10 @@
         "occurredAtUtc", "occurredMonotonicUs", "lastSequences"
       ]
     },
+    "measurementClock": {
+      "enum": ["elapsed_realtime", "unverified", "unavailable"],
+      "description": "State of a source's measurement clock. elapsed_realtime: verified to share the SystemClock.elapsedRealtimeNanos domain; samples carry a non-null measurementMonotonicUs. unverified: not (or no longer) proven; samples carry null. unavailable: no usable measurement clock; samples carry null. The state in force for a sample is the latest declaration or source_clock_state event before it in file order; changes are never retroactive."
+    },
     "sourceDeclaration": {
       "type": "object",
       "properties": {
@@ -110,10 +114,7 @@
         "sensorType": { "type": "string", "minLength": 1 },
         "available": { "type": "boolean" },
         "unavailableReason": { "type": "string", "minLength": 1 },
-        "measurementClock": {
-          "enum": ["elapsed_realtime", "unverified", "unavailable"],
-          "description": "elapsed_realtime: the writer verified at start that sensor timestamps share the SystemClock.elapsedRealtimeNanos domain. unverified: the platform clock domain is unproven (iOS in v1). unavailable: samples carry measurementMonotonicUs null."
-        },
+        "measurementClock": { "$ref": "#/$defs/measurementClock" },
         "axisFrame": { "enum": ["android_sensor", "core_motion_device"] },
         "attitudeReference": {
           "enum": ["game_rotation_vector", "rotation_vector", "core_motion_arbitrary_z_vertical"]
@@ -147,6 +148,7 @@
       "oneOf": [
         { "$ref": "#/$defs/eventMotionStarted" },
         { "$ref": "#/$defs/eventClockMap" },
+        { "$ref": "#/$defs/eventSourceClockState" },
         { "$ref": "#/$defs/eventSamplesDropped" },
         { "$ref": "#/$defs/eventClockAdjusted" },
         { "$ref": "#/$defs/eventLogTruncated" },
@@ -188,15 +190,37 @@
       ],
       "unevaluatedProperties": false
     },
-    "eventSamplesDropped": {
+    "eventSourceClockState": {
       "allOf": [{ "$ref": "#/$defs/motionEventBase" }],
+      "properties": {
+        "eventType": { "const": "source_clock_state" },
+        "sourceId": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "previousMeasurementClock": { "$ref": "#/$defs/measurementClock" },
+        "measurementClock": { "$ref": "#/$defs/measurementClock" },
+        "reason": { "enum": ["verification_passed", "verification_failed", "clock_domain_changed"] }
+      },
+      "required": ["eventType", "sourceId", "previousMeasurementClock", "measurementClock", "reason"],
+      "unevaluatedProperties": false
+    },
+    "eventSamplesDropped": {
+      "allOf": [
+        { "$ref": "#/$defs/motionEventBase" },
+        {
+          "if": { "properties": { "droppedCount": { "type": "null" } }, "required": ["droppedCount"] },
+          "then": { "properties": { "reason": { "enum": ["sensor_unavailable", "sensor_interrupted", "writer_error"] } } }
+        }
+      ],
       "properties": {
         "eventType": { "const": "samples_dropped" },
         "sourceId": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
-        "droppedCount": { "type": "integer", "minimum": 1 },
+        "droppedCount": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "null when the count is unknowable (a sensor interruption). Writers must not guess; null is only legal for sensor_unavailable, sensor_interrupted and writer_error."
+        },
         "firstDroppedMonotonicUs": { "oneOf": [{ "$ref": "common.schema.json#/$defs/monotonicUs" }, { "type": "null" }] },
         "lastDroppedMonotonicUs": { "oneOf": [{ "$ref": "common.schema.json#/$defs/monotonicUs" }, { "type": "null" }] },
-        "reason": { "enum": ["buffer_full", "writer_error", "sensor_unavailable", "recording_paused"] }
+        "reason": { "enum": ["buffer_full", "writer_error", "sensor_unavailable", "sensor_interrupted", "recording_paused"] }
       },
       "required": [
         "eventType", "sourceId", "droppedCount", "firstDroppedMonotonicUs",

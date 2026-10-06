@@ -136,10 +136,15 @@
         "algorithmVersion": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
         "sourceRefs": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/sourceRef" } },
         "clockMapId": { "type": ["integer", "null"], "minimum": 0 },
-        "extremumEligible": { "type": "boolean" }
+        "extremumEligible": { "type": "boolean" },
+        "filterEpoch": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Fusion-state epoch: the number of the latest estimator_reset. The estimate depends on inputs from that reset's initialInputs onward, not only on sourceRefs."
+        }
       },
       "required": [
-        "recordType", "measurementMonotonicUs", "computedMonotonicUs", "leanAngleDeg",
+        "recordType", "filterEpoch", "measurementMonotonicUs", "computedMonotonicUs", "leanAngleDeg",
         "calibrationId", "algorithmVersion", "sourceRefs", "clockMapId", "extremumEligible"
       ],
       "unevaluatedProperties": false
@@ -215,6 +220,8 @@
       "oneOf": [
         { "$ref": "#/$defs/eventLeanStarted" },
         { "$ref": "#/$defs/eventCalibrationInvalidated" },
+        { "$ref": "#/$defs/eventEstimatorReset" },
+        { "$ref": "#/$defs/eventEstimatorState" },
         { "$ref": "#/$defs/eventRecordsDropped" },
         { "$ref": "#/$defs/eventClockAdjusted" },
         { "$ref": "#/$defs/eventLogTruncated" },
@@ -230,6 +237,10 @@
         "algorithmVersion": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
         "inputSourceIds": { "type": "array", "minItems": 1, "items": { "$ref": "common.schema.json#/$defs/nonEmptyString" } },
         "maxInputGapUs": { "type": "integer", "minimum": 1 },
+        "replayable": {
+          "type": "boolean",
+          "description": "true: every non-null estimate can be replayed from its epoch boundary using only stored, complete input (storageStride 1, no break inside an epoch). Verified by paired validation."
+        },
         "extremumPolicy": {
           "type": "object",
           "properties": {
@@ -241,7 +252,48 @@
           "additionalProperties": false
         }
       },
-      "required": ["eventType", "platform", "appVersion", "algorithmVersion", "inputSourceIds", "maxInputGapUs", "extremumPolicy"],
+      "required": ["eventType", "platform", "appVersion", "algorithmVersion", "inputSourceIds", "maxInputGapUs", "replayable", "extremumPolicy"],
+      "unevaluatedProperties": false
+    },
+    "eventEstimatorReset": {
+      "allOf": [{ "$ref": "#/$defs/leanEventBase" }],
+      "properties": {
+        "eventType": { "const": "estimator_reset" },
+        "filterEpoch": { "type": "integer", "minimum": 0 },
+        "reason": { "enum": ["start", "after_input_gap", "input_clock_state_change", "raw_write_failure", "boot_changed", "recovery"] },
+        "initialInputs": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Per input source, the first motion sequence the new epoch consumes. Replay starts here.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "sourceId": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+              "firstSequence": { "$ref": "common.schema.json#/$defs/sequence" }
+            },
+            "required": ["sourceId", "firstSequence"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": ["eventType", "filterEpoch", "reason", "initialInputs"],
+      "unevaluatedProperties": false
+    },
+    "eventEstimatorState": {
+      "allOf": [
+        { "$ref": "#/$defs/leanEventBase" },
+        {
+          "if": { "properties": { "state": { "const": "unavailable" } } },
+          "then": { "properties": { "reason": { "type": "string" } } },
+          "else": { "properties": { "reason": { "type": "null" } } }
+        }
+      ],
+      "properties": {
+        "eventType": { "const": "estimator_state" },
+        "state": { "enum": ["available", "unavailable"] },
+        "reason": { "enum": ["input_clock_not_verified", "input_interrupted", "raw_write_failed", null] }
+      },
+      "required": ["eventType", "state", "reason"],
       "unevaluatedProperties": false
     },
     "eventCalibrationInvalidated": {

@@ -40,6 +40,18 @@ motion 檔有三個感測器、各自序號空間，而檔案層事件（截斷�
 ### D9 型別策略
 沿用 0001 D8：JSON Schema＋fixtures，不生成模型。驗證器新增 `contracts/tools/validate-motion-lean.mjs`；lean 與 motion 的跨檔規則（來源關聯、時間、缺口）只在配對模式檢查。
 
+### D10 來源時鐘有生命週期（Codex 要求，2026-10-06）
+`measurementClock` 是位置性狀態：`motion_started` 宣告初始值，之後只能由 `source_clock_state` 事件變更（帶前一狀態，可驗證鏈）；重複 `motion_started` 不得隱含改寫。`unverified`／`unavailable` 時樣本的測量時間**一律為 null**；`elapsed_realtime` 時一律非 null。驗證通過或失敗都不追溯。精準對齊需要兩邊來源在該時段都已驗證。
+
+### D11 沒有測量時間就沒有估算
+輸入無測量時間時，不得用接收時間冒充 lean 的測量時刻；允許不寫 `lean_estimate`，以 `estimator_state: unavailable` 表達。感測中斷且數量未知時，`samples_dropped.droppedCount` 為 null，禁止猜測。
+
+### D12 融合重播以紀元為界
+估算帶 `filterEpoch`；`estimator_reset` 記錄 `initialInputs`。`sourceRefs` 只定義估算時刻，重播必須從紀元邊界使用完整已存輸入。`replayable` 由寫入端宣告並在配對驗證中強制：`storageStride > 1`、紀元內有缺口或引用未寫入序號時，不得聲稱可重播。原始寫入失敗必須重設紀元。
+
+### D13 跨 boot 的最大值
+新分段從「沒有有效最大值（null）」開始，與 §8 的 null 語義一致，不是 0。
+
 ## 後果
 
 - Codex 的 Android 寫入端必須輸出可通過 `validate-motion-lean.mjs` 的檔案；iOS 暫不輸出。

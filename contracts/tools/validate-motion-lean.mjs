@@ -80,6 +80,7 @@ const SAMPLE_DEFS = {
 const MOTION_EVENT_DEFS = {
   motion_started: 'eventMotionStarted',
   clock_map: 'eventClockMap',
+  source_clock_state: 'eventSourceClockState',
   samples_dropped: 'eventSamplesDropped',
   clock_adjusted: 'eventClockAdjusted',
   log_truncated: 'eventLogTruncated',
@@ -88,6 +89,8 @@ const MOTION_EVENT_DEFS = {
 const LEAN_EVENT_DEFS = {
   lean_started: 'eventLeanStarted',
   calibration_invalidated: 'eventCalibrationInvalidated',
+  estimator_reset: 'eventEstimatorReset',
+  estimator_state: 'eventEstimatorState',
   records_dropped: 'eventRecordsDropped',
   clock_adjusted: 'eventClockAdjusted',
   log_truncated: 'eventLogTruncated',
@@ -282,6 +285,9 @@ export function validateMotionLog(text) {
     lastBootId: null,
     started: false,
     declared: new Map(), // sourceId -> declaration of the latest motion_started
+    clockState: new Map(), // sourceId -> measurementClock in force at this point of the file
+    segmentOpen: false, // true between a motion_started and the next resume/boot declaration
+    lastSeen: new Map(), // sourceId -> {sequence, boot} of the previous sample
     clockMaps: new Map(), // mapId -> event
     lastMeasurement: new Map(), // sourceId -> Map(bootId -> us)
     lastReceived: new Map(),
@@ -289,7 +295,9 @@ export function validateMotionLog(text) {
     cover: new Map(), // sourceId -> [{boot, from, to}]
     allCover: [],
   };
-  const model = { samples: new Map(), drops: new Map() };
+  // `breaks` are points where a source's input is not continuous: a replay or
+  // an estimate must not straddle one. nextSeq is the first sequence after it.
+  const model = { sequences: new Map(), breaks: new Map(), declarations: new Map() };
   let sampleCount = 0;
   let eventCount = 0;
 
@@ -356,6 +364,7 @@ function checkMotionEvent(record, line, add) {
 function applyMotionEvent(state, spaceOf, record, line, add, model) {
   const declaring = record.eventType === 'clock_adjusted' || record.eventType === 'recording_resumed';
   trackBoot(state, record, declaring, line, add);
+  if (declaring) state.segmentOpen = false;
 
   for (const [source, last] of Object.entries(record.lastSequences)) {
     const space = spaceOf(source);
@@ -367,7 +376,40 @@ function applyMotionEvent(state, spaceOf, record, line, add, model) {
   switch (record.eventType) {
     case 'motion_started': {
       state.started = true;
+      // A repeated motion_started inside one segment must not rewrite a clock
+      // state that source_clock_state events own.
+      for (const source of record.sources) {
+        const current = state.clockState.get(source.sourceId);
+        if (state.segmentOpen && current !== undefined && current !== source.measurementClock) {
+          add('SOURCE_CLOCK_REDECLARED', line, `${source.sourceId} ${current} -> ${source.measurementClock} without source_clock_state`);
+        } else {
+          state.clockState.set(source.sourceId, source.measurementClock);
+        }
+        if (source.available) {
+          const known = model.declarations.get(source.sourceId);
+          model.declarations.set(source.sourceId, {
+            storageStride: Math.max(known?.storageStride ?? 1, source.storageStride),
+          });
+        }
+      }
+      state.segmentOpen = true;
       state.declared = new Map(record.sources.map((s) => [s.sourceId, s]));
+      break;
+    }
+    case 'source_clock_state': {
+      const tracked = state.clockState.get(record.sourceId);
+      if (!state.declared.has(record.sourceId)) {
+        add('SOURCE_NOT_DECLARED', line, `${record.sourceId} has no declaration to change`);
+        break;
+      }
+      if (tracked !== record.previousMeasurementClock || record.measurementClock === record.previousMeasurementClock) {
+        add('SOURCE_CLOCK_STATE_CHAIN', line, `${record.sourceId} is ${tracked}; event claims ${record.previousMeasurementClock} -> ${record.measurementClock}`);
+        break;
+      }
+      state.clockState.set(record.sourceId, record.measurementClock);
+      // Leaving or entering elapsed_realtime interrupts the usable input.
+      pushTo(model.breaks, record.sourceId, { boot: record.deviceBootId, nextSeq: spaceOf(record.sourceId).maxSequence + 1 });
+      pushTo(state.cover, record.sourceId, { boot: record.deviceBootId, from: 0, to: record.occurredMonotonicUs });
       break;
     }
     case 'clock_map': {
@@ -385,7 +427,7 @@ function applyMotionEvent(state, spaceOf, record, line, add, model) {
       const to = record.lastDroppedMonotonicUs ?? record.occurredMonotonicUs;
       const entry = { boot: record.deviceBootId, from, to };
       pushTo(state.cover, record.sourceId, entry);
-      pushTo(model.drops, record.sourceId, entry);
+      pushTo(model.breaks, record.sourceId, { boot: record.deviceBootId, nextSeq: spaceOf(record.sourceId).maxSequence + 1 });
       break;
     }
     case 'log_truncated':
@@ -419,18 +461,33 @@ function applyMotionSample(state, space, record, line, add, model) {
       if (declaration.sensorType !== record.sensorType) {
         add('SENSOR_TYPE_MISMATCH', line, `${record.sourceId} declared ${declaration.sensorType}, sample says ${record.sensorType}`);
       }
-      if (declaration.measurementClock === 'unavailable' && record.measurementMonotonicUs !== null) {
-        add('MEASUREMENT_CLOCK_MISMATCH', line, `${record.sourceId} declares no measurement clock but sample carries one`);
-      }
     }
+  }
+  // The clock state is positional: a verification that passes later does not
+  // validate earlier samples, and a failure does not invalidate them.
+  const clock = state.clockState.get(record.sourceId);
+  if (clock === 'elapsed_realtime' && record.measurementMonotonicUs === null) {
+    add('MEASUREMENT_CLOCK_MISMATCH', line, `${record.sourceId} is verified (elapsed_realtime) but the sample has no measurement time`);
+  } else if (clock !== undefined && clock !== 'elapsed_realtime' && record.measurementMonotonicUs !== null) {
+    add('MEASUREMENT_CLOCK_MISMATCH', line, `${record.sourceId} is ${clock} but the sample carries a measurement time`);
   }
 
   for (const flag of record.qualityFlags) {
     if (!KNOWN_MOTION_FLAGS.has(flag)) add('UNKNOWN_QUALITY_FLAG', line, flag);
   }
 
+  const previousSeen = state.lastSeen.get(record.sourceId);
   applySequence(space, record, line, add, record.sourceId);
   trackBoot(state, record, false, line, add);
+  if (previousSeen && record.sequence > previousSeen.sequence) {
+    // A sequence hole (truncation) or a boot change also breaks continuity.
+    if (record.sequence !== previousSeen.sequence + 1 || previousSeen.boot !== record.deviceBootId) {
+      pushTo(model.breaks, record.sourceId, { boot: record.deviceBootId, nextSeq: record.sequence });
+    }
+  }
+  if (!previousSeen || record.sequence > previousSeen.sequence) {
+    state.lastSeen.set(record.sourceId, { sequence: record.sequence, boot: record.deviceBootId });
+  }
 
   const received = bootMap(state.lastReceived, record.sourceId);
   checkMonotonic(received, record.deviceBootId, record.receivedMonotonicUs, {
@@ -467,10 +524,8 @@ function applyMotionSample(state, space, record, line, add, model) {
     }
   }
 
-  if (measured !== null) {
-    if (!model.samples.has(record.sourceId)) model.samples.set(record.sourceId, new Map());
-    model.samples.get(record.sourceId).set(record.sequence, { boot: record.deviceBootId, measurementUs: measured });
-  }
+  if (!model.sequences.has(record.sourceId)) model.sequences.set(record.sourceId, new Map());
+  model.sequences.get(record.sourceId).set(record.sequence, { boot: record.deviceBootId, measurementUs: measured });
 }
 
 function bootMap(map, key) {
@@ -516,6 +571,12 @@ export function validateLeanLog(text, { motion = null } = {}) {
     extremaBest: new Map(), // `${calibrationId}|${side}` -> record
     closed: new Set(),
     eligibleCount: new Map(),
+    replayable: false,
+    epochs: new Map(), // filterEpoch -> {reason, initialInputs: Map(sourceId -> sequence)}
+    currentEpoch: null,
+    unavailable: false,
+    resumeAfterEpoch: null,
+    strideReported: new Set(),
   };
   let recordCount = 0;
   let eventCount = 0;
@@ -610,6 +671,28 @@ function applyLeanEvent(state, spaceOf, record, line, add) {
   if (record.eventType === 'lean_started') {
     state.started = true;
     state.policy = record.extremumPolicy;
+    state.replayable = record.replayable;
+  }
+  if (record.eventType === 'estimator_reset') {
+    const expected = state.currentEpoch === null ? 0 : state.currentEpoch + 1;
+    if (record.filterEpoch !== expected) {
+      add('ESTIMATOR_EPOCH_ORDER', line, `filterEpoch ${record.filterEpoch}, expected ${expected}`);
+    } else {
+      state.epochs.set(record.filterEpoch, {
+        reason: record.reason,
+        initialInputs: new Map(record.initialInputs.map((i) => [i.sourceId, i.firstSequence])),
+      });
+      state.currentEpoch = record.filterEpoch;
+    }
+  }
+  if (record.eventType === 'estimator_state') {
+    if (record.state === 'unavailable') {
+      state.unavailable = true;
+    } else if (state.unavailable) {
+      // Coming back needs a fresh epoch: the fusion state did not survive.
+      state.unavailable = false;
+      state.resumeAfterEpoch = state.currentEpoch ?? -1;
+    }
   }
   if (record.eventType === 'log_truncated' || record.eventType === 'recording_resumed') {
     space.expectedNext = record.resumedSequence;
@@ -682,6 +765,17 @@ function applyEstimate(state, record, line, add, motion) {
     add('COMPUTED_BEFORE_MEASURED', line, 'computedMonotonicUs precedes measurementMonotonicUs');
   }
 
+  if (state.unavailable) {
+    add('ESTIMATE_WHILE_UNAVAILABLE', line, 'estimator_state is unavailable: no estimate may be written, none is invented from receive time');
+  }
+  if (state.currentEpoch === null || !state.epochs.has(record.filterEpoch)) {
+    add('ESTIMATE_EPOCH_UNKNOWN', line, `filterEpoch ${record.filterEpoch} has no estimator_reset`);
+  } else if (record.filterEpoch !== state.currentEpoch) {
+    add('ESTIMATE_EPOCH_STALE', line, `filterEpoch ${record.filterEpoch}, current is ${state.currentEpoch}`);
+  } else if (state.resumeAfterEpoch !== null && record.filterEpoch <= state.resumeAfterEpoch) {
+    add('ESTIMATE_EPOCH_STALE', line, `estimator became available again without a new estimator_reset`);
+  }
+
   const flags = new Set(record.qualityFlags);
   if (record.extremumEligible) {
     const blocking = [...flags].filter((flag) => BLOCKING_LEAN_FLAGS.has(flag));
@@ -723,16 +817,18 @@ function applyEstimate(state, record, line, add, motion) {
   }
 
   state.estimates.set(record.sequence, record);
-  if (motion) checkSourceRefs(record, line, add, motion);
+  if (motion) checkSourceRefs(record, line, add, motion, state);
 }
 
-function checkSourceRefs(record, line, add, motion) {
+function checkSourceRefs(record, line, add, motion, state) {
   let newestInput = -1;
-  let spansGap = false;
+  let spansBreak = false;
   for (const ref of record.sourceRefs) {
-    const samples = motion.model.samples.get(ref.sourceId);
+    const samples = motion.model.sequences.get(ref.sourceId);
     const first = samples?.get(ref.firstSequence);
     const last = samples?.get(ref.lastSequence);
+    // Only sequences the motion log actually holds can be referenced: an
+    // estimate must never name an input whose raw append failed.
     if (ref.firstSequence > ref.lastSequence || !first || !last) {
       add('SOURCE_REF_UNRESOLVED', line, `${ref.sourceId} ${ref.firstSequence}..${ref.lastSequence} not found in the motion log`);
       continue;
@@ -741,17 +837,44 @@ function checkSourceRefs(record, line, add, motion) {
       add('SOURCE_REF_BOOT_MISMATCH', line, `${ref.sourceId} samples belong to ${first.boot}/${last.boot}, estimate is ${record.deviceBootId}`);
       continue;
     }
-    newestInput = Math.max(newestInput, last.measurementUs);
-    const drops = motion.model.drops.get(ref.sourceId) ?? [];
-    if (drops.some((d) => d.boot === record.deviceBootId && d.from <= last.measurementUs && d.to >= first.measurementUs)) {
-      spansGap = true;
+    if (last.measurementUs === null) {
+      add('SOURCE_REF_NO_MEASUREMENT_TIME', line, `${ref.sourceId} sequence ${ref.lastSequence} has no measurement time; receive time may not stand in for it`);
+      continue;
     }
+    newestInput = Math.max(newestInput, last.measurementUs);
+    const breaks = (motion.model.breaks.get(ref.sourceId) ?? []).filter((b) => b.boot === record.deviceBootId);
+    if (breaks.some((b) => ref.firstSequence < b.nextSeq && b.nextSeq <= ref.lastSequence)) spansBreak = true;
+    if (state.replayable && record.leanAngleDeg !== null) checkReplay(record, ref, samples, breaks, line, add, motion, state);
   }
   if (newestInput >= 0 && newestInput !== record.measurementMonotonicUs) {
     add('ESTIMATE_TIME_MISMATCH', line, `measurementMonotonicUs ${record.measurementMonotonicUs} != newest referenced input ${newestInput}`);
   }
-  if (spansGap && !(record.leanAngleDeg === null && record.qualityFlags.includes('input_gap'))) {
-    add('ESTIMATE_SPANS_GAP', line, 'referenced inputs span a recorded gap: the angle must be null with input_gap');
+  if (spansBreak && !(record.leanAngleDeg === null && record.qualityFlags.includes('input_gap'))) {
+    add('ESTIMATE_SPANS_GAP', line, 'referenced inputs span a recorded gap, clock change or boot change: the angle must be null with input_gap');
+  }
+}
+
+// Fusion has history: an estimate depends on every input since its epoch
+// boundary, not just on the newest referenced samples.
+function checkReplay(record, ref, samples, breaks, line, add, motion, state) {
+  const initial = state.epochs.get(record.filterEpoch)?.initialInputs.get(ref.sourceId);
+  if (initial === undefined) {
+    add('REPLAY_INPUTS_INCOMPLETE', line, `epoch ${record.filterEpoch} declares no initial input for ${ref.sourceId}`);
+    return;
+  }
+  if (ref.firstSequence < initial) {
+    add('SOURCE_REF_BEFORE_EPOCH', line, `${ref.sourceId} ref starts at ${ref.firstSequence}, before epoch start ${initial}`);
+  }
+  const start = samples.get(initial);
+  if (!start || start.boot !== record.deviceBootId) {
+    add('REPLAY_INPUTS_INCOMPLETE', line, `${ref.sourceId} epoch start ${initial} is not stored in this boot`);
+  } else if (breaks.some((b) => initial < b.nextSeq && b.nextSeq <= ref.lastSequence)) {
+    add('REPLAY_INPUTS_INCOMPLETE', line, `${ref.sourceId} has a gap, clock change or boot change inside epoch ${record.filterEpoch}`);
+  }
+  const stride = motion.model.declarations.get(ref.sourceId)?.storageStride ?? 1;
+  if (stride > 1 && !state.strideReported.has(ref.sourceId)) {
+    state.strideReported.add(ref.sourceId);
+    add('REPLAY_STRIDE_DROPS_INPUTS', line, `${ref.sourceId} storageStride ${stride} discards inputs the filter used, yet replayable is true`);
   }
 }
 

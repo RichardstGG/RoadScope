@@ -87,17 +87,29 @@
 - 測量落後接收超過 10 秒是警告 `MEASUREMENT_RECEIVED_SKEW`：批次延遲不會這麼長，通常代表感測器時間戳其實不在 `elapsedRealtime` 域（部分裝置曾回報 `uptimeMillis` 域）。
 - `measurementMonotonicUs` 為 `null`（旗標 `measurement_monotonic_unavailable`）時，消費端**不得**以 `receivedMonotonicUs` 代替做測量間隔運算（同 location-log §3.4）。
 
-### 3.2 時間域驗證 `measurementClock`
+### 3.2 來源時鐘狀態 `measurementClock`（有生命週期）
 
-寫入端必須在 `motion_started` 為每個來源宣告：
+每個來源在任何時刻都處於三個狀態之一：
 
-| 值 | 意義 |
-|---|---|
-| `elapsed_realtime` | 寫入端在啟動時**驗證過**感測器時間戳與 `elapsedRealtimeNanos()` 同域（例如前幾筆 callback 的接收時間減測量時間落在合理範圍，且非 `uptimeMillis` 的偏移）。 |
-| `unverified` | 時間域未證明。**iOS 在 v1 一律如此**：不得宣稱 Core Motion 時間戳等同 `mach_continuous_time()` 域，待真機驗證。 |
-| `unavailable` | 沒有可用的測量時鐘，所有樣本 `measurementMonotonicUs` 為 `null`。宣告 `unavailable` 卻寫出非 null 值是 `MEASUREMENT_CLOCK_MISMATCH`。 |
+| 狀態 | 意義 | 樣本的 `measurementMonotonicUs` |
+|---|---|---|
+| `elapsed_realtime` | 已驗證：感測器時間戳與 `SystemClock.elapsedRealtimeNanos()` 同域。 | **必須非 null** |
+| `unverified` | 尚未（或不再）被證明。**iOS 在 v1 一律如此。** | **必須為 `null`**＋`measurement_monotonic_unavailable` |
+| `unavailable` | 沒有可用的測量時鐘。 | **必須為 `null`**＋`measurement_monotonic_unavailable` |
 
-驗證方法歸 Codex 實作；契約只定義宣告值的意義，不定義門檻（見 §14 問題 2）。
+違反上表是 `MEASUREMENT_CLOCK_MISMATCH`。**`unverified` 時寫 null，不得寫一個「可能正確」的時間**：未驗證的時間域一旦被當成精準對齊依據，錯誤會悄悄混進計時。
+
+**狀態是位置性的、不可追溯的。** 某筆樣本適用的狀態，是檔案中它之前最近一次宣告或變更事件所設定的：
+
+1. 初始狀態由 `motion_started.sources[].measurementClock` 宣告（啟動時可能是 `unverified`）。
+2. 之後的變更**只能**用 `source_clock_state` 事件：`sourceId`、`previousMeasurementClock`、`measurementClock`、`reason`（`verification_passed`｜`verification_failed`｜`clock_domain_changed`）。`previousMeasurementClock` 必須等於當時的現行狀態，且與新狀態不同（`SOURCE_CLOCK_STATE_CHAIN`），因此變更可排序、可重播。
+3. 驗證通過**不會**讓先前的 null 樣本變成有時間；運行中失敗**不會**讓先前已寫出的時間失效。已落盤樣本永不改寫。
+4. **同一段（`motion_started` 到下一次 `recording_resumed`／`clock_adjusted`）內，重複的 `motion_started` 不得改變任何來源的時鐘狀態**（`SOURCE_CLOCK_REDECLARED`）：它不是狀態變更的通道。續錄後的新 `motion_started` 重新宣告初始狀態。
+5. 每次進出 `elapsed_realtime` 都是該來源輸入的**中斷點**：估算不得橫跨（§9.1），濾波必須重設（§9.4）。
+
+**精準單調對齊需要同時滿足**：兩邊來源在該時段都處於 `elapsed_realtime`（motion 側由本節狀態、location-log 側由 `sourceCapabilities.measurementMonotonic = true`），且 `deviceBootId` 相同。`unverified` 時段只能以 `receivedMonotonicUs`／UTC 做粗略顯示，不得進入精準對齊或傾角估算。
+
+驗證方法（啟動時如何判斷時間戳屬 elapsedRealtime 域、門檻多少）歸 Codex 實作；契約只定義狀態的意義與轉換規則。
 
 ### 3.3 UTC 映射 `clock_map`
 
@@ -127,7 +139,7 @@ UTC 只能由單調時間加上映射偏移得到，映射以 `clock_map` 事件
 
 對齊主鍵是 `(deviceBootId, measurementMonotonicUs)`，與 location-log 的 `measurementMonotonicUs` 直接比較，不經過 UTC。規則：
 
-1. 兩邊的 `measurementMonotonicUs` 都必須非 null，且 `deviceBootId` 相同。
+1. 兩邊的 `measurementMonotonicUs` 都必須非 null（即兩邊來源在該時段都已驗證，§3.2），且 `deviceBootId` 相同。
 2. 消費端以時間最近鄰或在兩個相鄰 GPS 之間分段處理；**不得**在跨 `samples_dropped` 缺口、跨 boot 或跨 `clock_adjusted` 處內插。
 3. GPS 固定間隔通常為 1 Hz，感測器為數十 Hz：對齊是「GPS 樣本對應其測量時間前後的傾角估算」，不是反過來。
 4. UTC 對齊只在兩邊都有映射／GPS UTC、且 boot 相同時作為輔助，並承擔 `uncertaintyUs`。
@@ -158,7 +170,8 @@ UTC 只能由單調時間加上映射偏移得到，映射以 `clock_map` 事件
 |---|---|---|
 | `motion_started` | 每次開始或續錄，**排在該段任何樣本之前** | `platform`、`appVersion`、`bootAnchorUtcMs`、`sources[]` |
 | `clock_map` | §3.3 | `mapId`、`effectiveFromMonotonicUs`、`offsetUtcMinusMonotonicUs`、`mappingSource`、`uncertaintyUs` |
-| `samples_dropped` | 有界緩衝或寫入失敗造成缺樣，**在缺口之後第一筆樣本之前寫出** | `sourceId`、`droppedCount`、`firstDroppedMonotonicUs`、`lastDroppedMonotonicUs`（可為 null）、`reason` |
+| `source_clock_state` | 來源時鐘狀態變更（§3.2） | `sourceId`、`previousMeasurementClock`、`measurementClock`、`reason` |
+| `samples_dropped` | 有界緩衝、寫入失敗或感測中斷造成缺樣，**在缺口之後第一筆樣本之前寫出** | `sourceId`、`droppedCount`（可為 null）、`firstDroppedMonotonicUs`／`lastDroppedMonotonicUs`（可為 null）、`reason`（`buffer_full`｜`writer_error`｜`sensor_unavailable`｜`sensor_interrupted`｜`recording_paused`） |
 | `clock_adjusted` | 同 location-log：偵測到時鐘調整或 boot anchor 位移 | `previousDeviceBootId`、`previousBootAnchorUtcMs`、`bootAnchorUtcMs`、`thresholdMs` |
 | `log_truncated` | 修復損壞尾行後 | `truncatedBytes`、`resumedSequences`（各 `sourceId` → 下一個序號） |
 | `recording_resumed` | 崩潰、行程重啟或重開機後續錄 | `reason`（`crash`／`process_restart`／`boot`）、`resumedSequences` |
@@ -228,12 +241,15 @@ leanAngleDeg = atan2( (u0 × u') · a , u0 · u' ) × 180/π
 | `calibrationId` | 使用的校準；沒有有效校準時為 `null`＋`no_valid_calibration`，且 `leanAngleDeg` 必為 `null`（`ANGLE_WITHOUT_CALIBRATION`）。 |
 | `sourceRefs[]` | 來源樣本關聯：`{sourceId, firstSequence, lastSequence}`，指向 motion 檔同一 `recordingId`、同一 `deviceBootId` 的序號範圍。 |
 | `algorithmVersion` | 估算演算法版本（融合與投影）。 |
+| `filterEpoch` | 融合狀態紀元：最近一次 `estimator_reset` 的編號（§9.4）。估算依賴該次重設起的**全部**輸入，不只 `sourceRefs`。 |
 | `clockMapId` | 輸入樣本的映射，供 UTC 呈現；不影響對時。 |
 | `extremumEligible` | 此估算是否可參與分段最大值。 |
 | `qualityFlags` | 見下。 |
 
 估算檢查：
 
+- **沒有測量時間就沒有估算。** 輸入樣本的 `measurementMonotonicUs` 為 null 時，寫入端**不得**用 `receivedMonotonicUs` 或任何接收時間填 `lean_estimate.measurementMonotonicUs`，允許（且預期）**完全不寫 `lean_estimate`**，改以 `estimator_state: unavailable` 事件讓 UI 與消費端知道傾角不可用（§8.3）。引用沒有測量時間的樣本是 `SOURCE_REF_NO_MEASUREMENT_TIME`。
+- `filterEpoch` 必須等於現行紀元（`ESTIMATE_EPOCH_STALE`／`ESTIMATE_EPOCH_UNKNOWN`）；`estimator_state` 為 `unavailable` 期間不得有任何估算（`ESTIMATE_WHILE_UNAVAILABLE`）。
 - `calibrationId` 非 null 時，必須是**現行**校準：校準存在（`CALIBRATION_UNKNOWN`）、同 boot（`CALIBRATION_BOOT_MISMATCH`）、未被取代（`ESTIMATE_STALE_CALIBRATION`）、測量時間不早於其生效（`ESTIMATE_BEFORE_CALIBRATION`）、分段未結案（`ESTIMATE_AFTER_SEGMENT_CLOSED`）。
 - 校準的 `leanAxisSource` 不是 `manual_left_lean`／`inherited_from_previous` 時，`leanAngleDeg` 必為 `null`（`ANGLE_WITH_UNKNOWN_AXIS`）。
 - 已知旗標：`lean_unavailable`、`no_valid_calibration`、`lean_axis_unknown`、`input_gap`、`after_input_gap`、`dynamic_acceleration_high`、`carried_over_unverified`、`clock_map_unavailable`、`synthetic`。
@@ -270,7 +286,9 @@ leanAngleDeg = atan2( (u0 × u') · a , u0 · u' ) × 180/π
 
 | `eventType` | 專屬欄位 |
 |---|---|
-| `lean_started` | `platform`、`appVersion`、`algorithmVersion`、`inputSourceIds[]`、`maxInputGapUs`、`extremumPolicy{policyVersion, rule, minWindowUs}` |
+| `lean_started` | `platform`、`appVersion`、`algorithmVersion`、`inputSourceIds[]`、`maxInputGapUs`、`replayable`、`extremumPolicy{policyVersion, rule, minWindowUs}`。其後必須有 `estimator_reset`（`filterEpoch = 0`，`reason = start`）。 |
+| `estimator_reset` | `filterEpoch`、`reason`（`start`｜`after_input_gap`｜`input_clock_state_change`｜`raw_write_failure`｜`boot_changed`｜`recovery`）、`initialInputs[]`（`{sourceId, firstSequence}`：新紀元消費的第一筆輸入序號）。紀元從 0 起逐一遞增（`ESTIMATOR_EPOCH_ORDER`）。 |
+| `estimator_state` | `state`（`available`｜`unavailable`）、`reason`（`unavailable` 時必填：`input_clock_not_verified`｜`input_interrupted`｜`raw_write_failed`；`available` 時為 `null`）。從 `unavailable` 回到 `available` 之後，第一筆估算必須屬於**新**紀元（需要 `estimator_reset`），因為融合狀態沒有撐過中斷。 |
 | `calibration_invalidated` | `calibrationId`、`invalidatedAtMonotonicUs`、`reason` |
 | `records_dropped` | `droppedCount`、`firstDroppedMonotonicUs`、`lastDroppedMonotonicUs`（可為 null）、`reason`（`buffer_full`｜`writer_error`｜`recording_paused`） |
 | `clock_adjusted`／`log_truncated`／`recording_resumed` | 同 location-log，`resumedSequence` 為單一整數 |
@@ -282,7 +300,8 @@ leanAngleDeg = atan2( (u0 × u') · a , u0 · u' ) × 180/π
 1. 缺樣以 `samples_dropped`（motion）或 `records_dropped`（lean）表達，**不佔序號**。測量時間範圍可為 `null`（寫入端不知道時），此時缺口視為落在「該來源最後一筆樣本」與事件時刻之間。
 2. 相鄰樣本時間差超過 `gapThresholdUs` 而沒有事件涵蓋，是警告 `MOTION_TIME_GAP`（資料不可信，但不整檔作廢）。
 3. **禁止跨缺口插出假資料。** 估算的 `sourceRefs` 範圍若橫跨該來源已記錄的缺口，該估算必須 `leanAngleDeg = null` 且帶 `input_gap`（`ESTIMATE_SPANS_GAP`，需配對檢查）。缺口之後第一個估算建議帶 `after_input_gap`，並維持 `extremumEligible = false` 直到濾波重新收斂；收斂條件屬演算法版本。
-4. 有界緩衝滿載時**丟棄新樣本並計數**，不得阻塞感測器 callback、不得無界成長（§11）。
+4. **不知道缺了多少就不要猜。** 感測器中斷（`sensor_interrupted`／`sensor_unavailable`／`writer_error`）時 `droppedCount` 與兩個時間界限可為 `null`；只有寫入端自己的計數器能確知數量的 `buffer_full` 必須帶數字（schema 強制）。範圍為 null 時，缺口視為落在該來源最後一筆樣本與事件時刻之間。
+5. 有界緩衝滿載時**丟棄新樣本並計數**，不得阻塞感測器 callback、不得無界成長（§11）。
 
 ### 9.2 跨 boot
 
@@ -295,7 +314,7 @@ leanAngleDeg = atan2( (u0 × u') · a , u0 · u' ) × 180/π
 5. **校準只對產生它的 boot 有效**（`CALIBRATION_BOOT_MISMATCH`）。重開機後：
    - 舊分段以 `boot_changed` 結案（或不結案，§8.2）；
    - 寫入端可寫一個 `origin = carried_over` 的新校準沿用舊安裝方位（需 `carriedOverFromCalibrationId`、`evidence = null`，估算帶 `carried_over_unverified`），**或**停止輸出傾角（`calibrationId = null`）直到新的手動／自動校準。使用者可能在重開機期間取下手機，v1 不規定寫入端必須沿用哪一個，見 §14 問題 4。
-   - 新分段的最大值**從零開始**，不與舊分段合併。
+   - 新分段的最大值**從「沒有有效最大值」（`null`）開始**，不與舊分段合併；有第一筆合格估算之後才出現數值（§8.2）。
 
 ### 9.3 截斷恢復
 
@@ -303,6 +322,20 @@ leanAngleDeg = atan2( (u0 × u') · a , u0 · u' ) × 180/π
 2. 恢復後同一 boot 內的續錄寫 `recording_resumed`（`crash`／`process_restart`）。
 3. 恢復**不重寫**舊資料；lean 的未結案分段保持未結案。若寫入端能確定該分段已過期，在續錄後以 `recording_interrupted` 結案，結案時間取最後已知估算的測量時間。
 4. 重讀整份檔案必須冪等：鍵為 `(recordingId, sourceId, sequence)`（同 location-log §7.7）。單一檔案內重複序號是缺陷（`SEQUENCE_DUPLICATE`／`SEQUENCE_CONFLICT`）。
+
+### 9.4 融合重播與 `sourceRefs`
+
+融合有歷史狀態（姿態濾波器的內部狀態取決於它看過的整段輸入），所以：
+
+1. **`sourceRefs` 只標示估算的最新輸入，它定義估算時刻，不等於融合歷史。** 重播一個估算，必須從它所屬紀元的邊界開始：`estimator_reset.initialInputs` 指出每個輸入來源的起點序號，重播使用該序號到估算引用的 `lastSequence` 之間**完整且已保存**的 motion 輸入。
+2. **紀元在輸入不連續時必須重設**：缺樣（`samples_dropped`）、序號缺口（截斷）、來源時鐘狀態變更、boot 改變、原始寫入失敗、續錄恢復。重設的 `reason` 記錄原因。
+3. **`replayable`（`lean_started`）是寫入端的宣告**，`true` 的意思是：每個非 null 估算都可僅憑已存的輸入從紀元邊界重播。配對驗證強制：
+   - 輸入來源的 `storageStride` 必須為 1，否則 `REPLAY_STRIDE_DROPS_INPUTS`——**被 stride 略過的樣本是演算法實際用過的輸入時，不能聲稱可重播**。需要降低儲存頻率時，寫入端必須宣告 `replayable = false`（估算仍然有效，只是不可重播）；
+   - 紀元起點到引用終點之間，輸入序號必須連續存在且在同一 boot、沒有缺口／狀態變更（`REPLAY_INPUTS_INCOMPLETE`）；
+   - 引用不得早於紀元起點（`SOURCE_REF_BEFORE_EPOCH`）。
+   `sourceRefs` 必須列出每個影響該估算的輸入來源；null 角度的估算（例如橫跨缺口者）不主張重播。
+4. **原始寫入失敗**：估算只可引用**已成功追加**到 motion 檔的序號（`SOURCE_REF_UNRESOLVED`）。寫入失敗的樣本沒有序號、以 `samples_dropped`（`writer_error`）記錄；若濾波器已經消費了該樣本，必須立即 `estimator_reset`（`raw_write_failure`），起點為失敗之後第一個已存序號，之後的估算才可聲稱可重播。
+5. **寫入順序**：lean 估算引用的 motion 行，必須先於該估算行被追加（並依寫入端的 flush 策略落盤）。崩潰後若 lean 引用了 motion 檔尾端已遺失的序號，那是資料遺失而非合法狀態，驗證會報 `SOURCE_REF_UNRESOLVED`；續錄時 `estimator_reset`（`recovery`）把紀元切在恢復點。
 
 ## 10. 與 location-log v1 的相容性
 
@@ -354,7 +387,7 @@ fixtures 位於 `testdata/contracts/motion-lean/v1/`：
 ### 錯誤碼
 
 error（資料不可信，驗證失敗）：
-`NOT_JSON`、`MISSING_RECORD_TYPE`、`SCHEMA_INVALID`、`NULL_FLAG_MISMATCH`、`SEQUENCE_CONFLICT`、`SEQUENCE_DUPLICATE`、`MONOTONIC_REGRESSION`、`MEASUREMENT_MONOTONIC_REGRESSION`、`EVENT_SEQUENCE_AHEAD`、`MEASUREMENT_AFTER_RECEIVED`、`MEASUREMENT_CLOCK_MISMATCH`、`QUATERNION_NOT_UNIT`、`SOURCE_NOT_DECLARED`、`SENSOR_TYPE_MISMATCH`、`CLOCK_MAP_UNKNOWN`、`CLOCK_MAP_BOOT_MISMATCH`、`CLOCK_MAP_ID_REUSED`、`VECTOR_NOT_UNIT`、`AXIS_NOT_ORTHOGONAL`、`CALIBRATION_DUPLICATE_ID`、`CALIBRATION_SUPERSEDES_UNKNOWN`、`CALIBRATION_SUPERSEDES_MISMATCH`、`CALIBRATION_ORDER`、`CALIBRATION_RETROACTIVE`、`CALIBRATION_UNKNOWN`、`CALIBRATION_BOOT_MISMATCH`、`ESTIMATE_STALE_CALIBRATION`、`ESTIMATE_BEFORE_CALIBRATION`、`ESTIMATE_ON_INVALIDATED_CALIBRATION`、`ESTIMATE_AFTER_SEGMENT_CLOSED`、`ANGLE_WITHOUT_CALIBRATION`、`ANGLE_WITH_UNKNOWN_AXIS`、`COMPUTED_BEFORE_MEASURED`、`EXTREMUM_ELIGIBLE_BLOCKED`、`EXTREMUM_DECREASED`、`EXTREMUM_ESTIMATE_INELIGIBLE`、`EXTREMUM_VALUE_MISMATCH`、`EXTREMUM_WINDOW_TOO_SHORT`、`SEGMENT_SUMMARY_MISMATCH`、`SEGMENT_CLOSED_TWICE`；配對檢查另有 `SOURCE_REF_UNRESOLVED`、`SOURCE_REF_BOOT_MISMATCH`、`ESTIMATE_TIME_MISMATCH`、`ESTIMATE_SPANS_GAP`。
+`NOT_JSON`、`MISSING_RECORD_TYPE`、`SCHEMA_INVALID`、`NULL_FLAG_MISMATCH`、`SEQUENCE_CONFLICT`、`SEQUENCE_DUPLICATE`、`MONOTONIC_REGRESSION`、`MEASUREMENT_MONOTONIC_REGRESSION`、`EVENT_SEQUENCE_AHEAD`、`MEASUREMENT_AFTER_RECEIVED`、`MEASUREMENT_CLOCK_MISMATCH`、`QUATERNION_NOT_UNIT`、`SOURCE_NOT_DECLARED`、`SENSOR_TYPE_MISMATCH`、`SOURCE_CLOCK_STATE_CHAIN`、`SOURCE_CLOCK_REDECLARED`、`CLOCK_MAP_UNKNOWN`、`CLOCK_MAP_BOOT_MISMATCH`、`CLOCK_MAP_ID_REUSED`、`VECTOR_NOT_UNIT`、`AXIS_NOT_ORTHOGONAL`、`CALIBRATION_DUPLICATE_ID`、`CALIBRATION_SUPERSEDES_UNKNOWN`、`CALIBRATION_SUPERSEDES_MISMATCH`、`CALIBRATION_ORDER`、`CALIBRATION_RETROACTIVE`、`CALIBRATION_UNKNOWN`、`CALIBRATION_BOOT_MISMATCH`、`ESTIMATE_STALE_CALIBRATION`、`ESTIMATE_BEFORE_CALIBRATION`、`ESTIMATE_ON_INVALIDATED_CALIBRATION`、`ESTIMATE_AFTER_SEGMENT_CLOSED`、`ANGLE_WITHOUT_CALIBRATION`、`ANGLE_WITH_UNKNOWN_AXIS`、`COMPUTED_BEFORE_MEASURED`、`EXTREMUM_ELIGIBLE_BLOCKED`、`EXTREMUM_DECREASED`、`EXTREMUM_ESTIMATE_INELIGIBLE`、`EXTREMUM_VALUE_MISMATCH`、`EXTREMUM_WINDOW_TOO_SHORT`、`SEGMENT_SUMMARY_MISMATCH`、`SEGMENT_CLOSED_TWICE`、`ESTIMATOR_EPOCH_ORDER`、`ESTIMATE_EPOCH_UNKNOWN`、`ESTIMATE_EPOCH_STALE`、`ESTIMATE_WHILE_UNAVAILABLE`；配對檢查另有 `SOURCE_REF_UNRESOLVED`、`SOURCE_REF_BOOT_MISMATCH`、`SOURCE_REF_NO_MEASUREMENT_TIME`、`SOURCE_REF_BEFORE_EPOCH`、`ESTIMATE_TIME_MISMATCH`、`ESTIMATE_SPANS_GAP`、`REPLAY_INPUTS_INCOMPLETE`、`REPLAY_STRIDE_DROPS_INPUTS`。
 
 warning（契約明文容忍，不失敗）：
 `SEQUENCE_GAP`、`BOOT_ID_CHANGE_UNDECLARED`、`UNKNOWN_QUALITY_FLAG`、`UNKNOWN_RECORD_TYPE`、`UNKNOWN_EVENT_TYPE`、`UNKNOWN_SENSOR_TYPE`、`MISSING_MOTION_STARTED`、`MISSING_LEAN_STARTED`、`MOTION_TIME_GAP`、`MEASUREMENT_RECEIVED_SKEW`。
@@ -369,14 +402,19 @@ warning（契約明文容忍，不失敗）：
 
 iOS：v1 對 iOS 只定義宣告與型別（`measurementClock = unverified`、來源 `unavailable`），**不聲稱已能採集傾角**，也不聲稱 Core Motion 時間戳的時間域。待 Android V1.0 基礎功能／UI 真機通過後再排 iOS 真機。
 
-待 Codex 確認的實作問題（也列在契約 PR 的說明中）：
+Codex 對 PR 初版的實作決定（已採納為契約前提，不再是開放問題）：
 
-1. **有界緩衝與單一寫入者**：三條感測器 callback → 單一寫入執行緒的緩衝容量、溢位策略（丟新或丟舊）與 `samples_dropped` 的產生點，在 Android 原生是否能做到「callback 不阻塞、序號只在寫入成功後遞增」？
-2. **時間域驗證**：`SensorEvent.timestamp` 屬 `elapsedRealtime` 域，是否能在各測試手機上於啟動時驗證？用什麼判斷（接收減測量的範圍）、門檻多少？驗證失敗時是否接受寫 `measurementClock = unverified`＋`measurement_monotonic_unavailable`？
-3. **儲存量**：§11.5 的約 180 MB／小時（50 Hz×3）在目標手機上是否可接受？是否需要 `storageStride`、批次記錄（`motion_batch`）或壓縮？這會是 v1 的相容擴充（新 `recordType`）而非破壞。
-4. **跨 boot 校準**：重開機後 v1 寫入端選擇「沿用（`carried_over`）」還是「停止輸出直到重新校準」？契約兩者皆允許；請 Codex 與使用者定產品行為。
-5. **姿態來源**：`game_rotation_vector`（無磁力計）是否足以在目標手機上取得穩定 Z 向上姿態？是否同時需要 `rotation_vector`？契約兩者皆可宣告。
-6. **`up_device` 的取得**：lean 檔只保存結果與來源序號關聯；動態融合（抑制加減速污染）放在原生還是 Dart？契約不限制，但 `lean_estimate` 的 `sourceRefs` 必須能指回 motion 檔的輸入樣本。
-7. **UTC 映射的產生**：`wall_clock_pair` 的兩次讀取間隔與 `uncertaintyUs` 的實際量級；`gps_fix_pair` 是否在 v1 就需要，或只用 `wall_clock_pair`。
-8. **`lean_started.extremumPolicy` 的數值**（`minWindowUs = 100000` 是工程起始值）與動態參考比較前的標示方式。
-9. **即時顯示通道**：EventChannel 限頻後的最新估算與落盤的 `lean_estimate` 是同一份資料嗎？契約假設 UI 看到的值一定能在 lean 檔找到對應記錄（或被 `records_dropped` 解釋）。
+- callback 非等待式放入有界緩衝，滿載丟新；單一 writer，完整行追加成功後才遞增序號；保留缺樣事件的緩衝容量。
+- 初版三個來源各目標 50 Hz、`storageStride = 1`；批次寫入多行 NDJSON，不新增 `motion_batch`。
+- 跨 boot **不沿用**有效校準：重新校準前傾角不可用，新分段最大值為 `null`。`carried_over` 在 v1 保留為合法值但本實作不使用。
+- 姿態優先 `game_rotation_vector`，`rotation_vector` 為替代；動態融合在 Kotlin，Dart 只做 UI／控制。
+- UTC 映射先用 `wall_clock_pair`；UI 只發布**已成功寫入**的估算。
+- 最大值窗口起始值 `minWindowUs = 100000`，仍是**未驗證的估算政策**。
+
+仍待實作與真機確認：
+
+1. 啟動時驗證 `SensorEvent.timestamp` 屬 elapsedRealtime 域的判斷與門檻；運行中失敗的偵測方式（何時寫 `source_clock_state` ＝ `verification_failed`）。
+2. `wall_clock_pair` 實際的 `uncertaintyUs` 量級。
+3. 儲存量（約 180 MB／小時）在目標手機上是否可接受；若需降頻，必須同時把 `replayable` 宣告為 `false`（§9.4）。
+4. §9.4 第 5 點的寫入順序在崩潰時能否保證，或需要在續錄時主動比對兩個檔案。
+5. `after_input_gap`／濾波收斂條件的具體判定（屬演算法版本）。
