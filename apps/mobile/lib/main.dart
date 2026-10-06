@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:mobile_data/mobile_data.dart';
 import 'package:share_plus/share_plus.dart';
 
+import 'motion_readiness.dart';
+
 void main() => runApp(const RoadScopeApp());
 
 class RoadScopeApp extends StatelessWidget {
@@ -483,6 +485,7 @@ class _RecorderScreenState extends State<RecorderScreen>
               'diagnostics telemetry 只含裝置與 App 狀態。',
             ),
             ..._backgroundExecutionSection(context),
+            const MotionReadiness(),
             ..._telemetrySection(context),
           ],
         ),

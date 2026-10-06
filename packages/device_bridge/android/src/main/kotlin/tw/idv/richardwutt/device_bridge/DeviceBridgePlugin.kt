@@ -44,6 +44,8 @@ class DeviceBridgePlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Activ
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
+            "motionCapabilities" -> result.success(motionCapabilities(context))
+            "motionStatus" -> result.success(LocationRecorderService.motionStatus(context))
             "start" -> start(result)
             "stop" -> {
                 context.startService(Intent(context, LocationRecorderService::class.java).apply {

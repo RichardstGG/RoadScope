@@ -13,6 +13,14 @@ class DeviceBridge {
   Future<void> start() async => _channel.invokeMethod<void>('start');
   Future<void> stop() async => _channel.invokeMethod<void>('stop');
 
+  /// Inventory only; sensor presence is not a vehicle-lean accuracy claim.
+  Future<Map<String, Object?>> motionCapabilities() async =>
+      await _channel.invokeMapMethod<String, Object?>('motionCapabilities') ??
+      const {};
+
+  Future<Map<String, Object?>> motionStatus() async =>
+      await _channel.invokeMapMethod<String, Object?>('motionStatus') ?? const {};
+
   Future<RecorderStatus> status() async {
     final raw = await _channel.invokeMapMethod<String, Object?>('status');
     if (raw == null) throw const FormatException('native status is missing');
