@@ -58,6 +58,72 @@ void main() {
     expect(find.text('開始記錄'), findsOneWidget);
     expect(calls, containsAllInOrder(['start', 'stop']));
   });
+
+  testWidgets('中斷狀態不冒充記錄中，且可明確接續同一筆記錄', (tester) async {
+    tester.view.physicalSize = const Size(1200, 2200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    var state = 'interrupted';
+    final calls = <String>[];
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      calls.add(call.method);
+      if (call.method == 'start') state = 'recording';
+      return switch (call.method) {
+        'status' => <String, Object?>{
+          'state': state,
+          'recordingId': 'existing-recording',
+        },
+        'readLog' || 'readTelemetry' => '',
+        _ => null,
+      };
+    });
+    await tester.pumpWidget(const RoadScopeApp());
+    await tester.pump();
+
+    expect(find.text('記錄已中斷'), findsOneWidget);
+    expect(find.text('停止記錄'), findsNothing);
+    expect(find.text('繼續同一次記錄'), findsOneWidget);
+    expect(find.text('結束這次記錄'), findsOneWidget);
+    expect(find.textContaining('不會只因重新開啟'), findsOneWidget);
+
+    await tester.tap(find.text('繼續同一次記錄'));
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('停止記錄'), findsOneWidget);
+    expect(calls, contains('start'));
+  });
+
+  testWidgets('中斷狀態可結束而不先恢復採集', (tester) async {
+    tester.view.physicalSize = const Size(1200, 2200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    var state = 'interrupted';
+    final calls = <String>[];
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      calls.add(call.method);
+      if (call.method == 'stop') state = 'idle';
+      return switch (call.method) {
+        'status' => <String, Object?>{
+          'state': state,
+          'recordingId': 'existing-recording',
+        },
+        'readLog' || 'readTelemetry' => '',
+        _ => null,
+      };
+    });
+    await tester.pumpWidget(const RoadScopeApp());
+    await tester.pump();
+
+    await tester.tap(find.text('結束這次記錄'));
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('開始記錄'), findsOneWidget);
+    expect(calls, contains('stop'));
+    expect(calls, isNot(contains('start')));
+  });
+
   testWidgets('定位逾期後隱藏舊速度，收到新定位後恢復', (tester) async {
     var age = 1000.0;
     final text = File(
@@ -288,6 +354,19 @@ void main() {
       );
       expect(logButton, findsOneWidget);
       expect(telemetryButton, findsOneWidget);
+      expect(tester.widget<OutlinedButton>(logButton).onPressed, isNull);
+      expect(tester.widget<OutlinedButton>(telemetryButton).onPressed, isNull);
+    });
+
+    testWidgets('中斷但尚未結束時兩種匯出仍停用', (tester) async {
+      await pump(
+        tester,
+        telemetry: File('$fixtures/android-state-changes.ndjson')
+            .readAsStringSync(),
+        state: 'interrupted',
+        logPath: '/tmp/rec.ndjson',
+        telemetryPath: '/tmp/rec.telemetry.ndjson',
+      );
       expect(tester.widget<OutlinedButton>(logButton).onPressed, isNull);
       expect(tester.widget<OutlinedButton>(telemetryButton).onPressed, isNull);
     });

@@ -46,7 +46,7 @@ dumpsys activity services …
 ## H2 · 恢復路徑在 UI 沒有入口
 
 - **擁有者路徑**：`apps/mobile/`（畫面）、`packages/device_bridge/android/`（狀態判讀）
-- **狀態**：等待使用者決定產品語義
+- **狀態**：Codex 處理中（語義已決、分支 `mobile/recording-resume-semantics`；待 Android 真機）
 - **為什麼不在本次範圍**：這是產品行為決策（程序被殺之後要不要、以及怎麼續錄），不是診斷資料的問題。
 
 程序在記錄中被終止後，`SharedPreferences` 的 `state` 仍是 `recording`。重開 App 時畫面依這個值顯示「停止記錄」，按下去走的是 `ACTION_STOP`，也就是**停止而不是續錄**。使用者沒有任何方法接續同一次記錄。
@@ -66,12 +66,14 @@ dumpsys activity services …
 
 **已由 Claude Code 緩解的部分**：telemetry 現在會補寫 `recording_interrupted`，所以**資料上**看得出上一段非正常結束（含定位紀錄寫到哪一個序號）。這只解決判讀，沒有解決使用者無法續錄。
 
+**Codex 處理**：使用者決定採明確手動續錄。原生 status 現在區分 `recording`（確實採集中）、`resuming`（Android 服務正在恢復）與 `interrupted`（只剩持久化續錄意圖）。`interrupted` 畫面提供「繼續同一次記錄」與「結束這次記錄」兩個動作；前者沿用 `recordingId` 與序號，後者關閉續錄意圖後才開放匯出。iOS plugin 初始化不再自行開始定位。自動化與靜態驗證已通過，Android 真機續錄／結束流程尚待驗證。
+
 ---
 
 ## H3 · 沒有 `BOOT_COMPLETED` receiver，`resumeReason: "boot"` 實務上不可達
 
 - **擁有者路徑**：`packages/device_bridge/android/`
-- **狀態**：等待使用者決定產品語義
+- **狀態**：已解決（決定不支援開機自動恢復；跨 boot 由使用者開 App 手動續錄）
 - **為什麼不在本次範圍**：開機自動恢復採集是記錄生命週期功能，需要產品決策，不屬於 telemetry。
 
 `LocationLogWriter` 與 telemetry 都有 `reason: "boot"` 的程式路徑，且有單元測試覆蓋（`boot rollback changes time domain but sequence continues`）。但 Android 的 `START_STICKY` 服務**不會跨裝置重開機重啟**，而專案沒有 `BOOT_COMPLETED` receiver，也沒有別的開機觸發點。
@@ -79,6 +81,8 @@ dumpsys activity services …
 加上 H2，重開機後 `prefs.state` 仍是 `recording`、畫面顯示「停止記錄」，所以使用者也無法手動接續。結論：**該程式路徑在真機上沒有觸發點**。
 
 **建議**：要嘛加上 `BOOT_COMPLETED` 並處理 Android 的開機後前景服務限制，要嘛明確記錄「不支援跨重開機恢復」並在文件標註該程式路徑僅為資料層相容性保留。無論哪一種，`contracts/location-log/v1` §8 對 `recording_resumed.reason` 的定義不需要改。
+
+**Codex 處理**：不新增 `BOOT_COMPLETED`／`LOCKED_BOOT_COMPLETED` receiver，也不為此要求背景定位權限。裝置重開機後只顯示可續錄的中斷狀態；使用者從前景按下續錄後，沿用同一 `recordingId` 與 sequence，資料層仍以 `recording_resumed.reason: "boot"` 宣告新時間域。靜態測試會在 Android manifests 出現 boot receiver 時失敗。跨 boot 的實際 UI 與序號接續仍待 Android 真機驗證。
 
 ---
 

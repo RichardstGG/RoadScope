@@ -15,6 +15,7 @@ public class DeviceBridgePlugin: NSObject, FlutterPlugin, CLLocationManagerDeleg
   private var bootAnchor: Int64 = 0
   private let thresholdMs: Int64 = 60_000
   private var telemetry: DeviceTelemetryMonitor?
+  private var startRequestedInThisProcess = false
   private var recordingId: String? { defaults.string(forKey: "roadscope.recordingId") }
   private var logURL: URL? {
     guard let id = recordingId else { return nil }
@@ -41,13 +42,16 @@ public class DeviceBridgePlugin: NSObject, FlutterPlugin, CLLocationManagerDeleg
     manager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
     manager.distanceFilter = kCLDistanceFilterNone
     resuming = defaults.bool(forKey: "roadscope.active")
-    if resuming { activateIfAuthorized() }
+    // A stored intent is not proof that Core Location is still active. Wait
+    // for an explicit foreground `start` call so relaunching the UI cannot
+    // silently resume location collection.
   }
 
   public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
     dispatchPrecondition(condition: .onQueue(.main))
     switch call.method {
     case "start":
+      startRequestedInThisProcess = true
       if !defaults.bool(forKey: "roadscope.active") {
         defaults.set(UUID().uuidString, forKey: "roadscope.recordingId")
         defaults.set(true, forKey: "roadscope.active")
@@ -78,10 +82,15 @@ public class DeviceBridgePlugin: NSObject, FlutterPlugin, CLLocationManagerDeleg
       defaults.set("idle", forKey: "roadscope.state")
       defaults.removeObject(forKey: "roadscope.error")
       segmentStarted = false
+      startRequestedInThisProcess = false
       result(nil)
     case "status":
+      let persistedState = defaults.string(forKey: "roadscope.state") ?? "idle"
+      let visibleState = defaults.bool(forKey: "roadscope.active")
+        && !segmentStarted && !startRequestedInThisProcess
+        ? "interrupted" : persistedState
       result([
-        "state": defaults.string(forKey: "roadscope.state") ?? "idle",
+        "state": visibleState,
         "recordingId": (recordingId as Any?) ?? NSNull(),
         "logPath": (logURL?.path as Any?) ?? NSNull(),
         "telemetryPath": (telemetryURL?.path as Any?) ?? NSNull(),

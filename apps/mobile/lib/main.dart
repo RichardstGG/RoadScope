@@ -87,16 +87,11 @@ class _RecorderScreenState extends State<RecorderScreen>
     }
   }
 
-  Future<void> _toggle() async {
+  Future<void> _runRecorderAction(Future<void> Function() action) async {
     if (_busy) return;
     setState(() => _busy = true);
     try {
-      if (_status?.isRecording == true ||
-          _status?.state == 'waiting_permission') {
-        await _bridge.stop();
-      } else {
-        await _bridge.start();
-      }
+      await action();
       await _refresh();
     } catch (error) {
       if (mounted) setState(() => _error = error.toString());
@@ -104,6 +99,16 @@ class _RecorderScreenState extends State<RecorderScreen>
       if (mounted) setState(() => _busy = false);
     }
   }
+
+  Future<void> _toggle() => _runRecorderAction(
+    _status?.isRecording == true || _status?.state == 'waiting_permission'
+        ? _bridge.stop
+        : _bridge.start,
+  );
+
+  Future<void> _resume() => _runRecorderAction(_bridge.start);
+
+  Future<void> _finishInterrupted() => _runRecorderAction(_bridge.stop);
 
   /// Each format is exported on its own, with its own wording, so a receiver
   /// can never mistake diagnostics telemetry for a location-log v1 file.
@@ -128,6 +133,8 @@ class _RecorderScreenState extends State<RecorderScreen>
 
   String _stateLabel(String? state) => switch (state) {
     'recording' => '記錄中',
+    'resuming' => '正在恢復記錄',
+    'interrupted' => '記錄已中斷',
     'waiting_permission' => '等待定位授權',
     'error' => '記錄錯誤',
     'idle' => '未記錄',
@@ -348,7 +355,9 @@ class _RecorderScreenState extends State<RecorderScreen>
                   .inMicroseconds /
               1000000;
     final stopped =
-        status?.isRecording != true && status?.state != 'waiting_permission';
+        status?.isRecording != true &&
+        status?.state != 'waiting_permission' &&
+        status?.state != 'interrupted';
     final age = status?.sampleAgeMs;
     final fresh =
         status?.isRecording == true &&
@@ -380,6 +389,14 @@ class _RecorderScreenState extends State<RecorderScreen>
                 _error!,
                 style: TextStyle(color: Theme.of(context).colorScheme.error),
               ),
+            if (status?.state == 'interrupted') ...[
+              Text(
+                '上一段原生採集已停止。你可以接續同一筆記錄，或結束後匯出；'
+                'App 不會只因重新開啟或裝置重開機就自動恢復定位。',
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+              const SizedBox(height: 12),
+            ],
             const SizedBox(height: 16),
             Text(
               !fresh || sample.speedMps == null
@@ -411,20 +428,32 @@ class _RecorderScreenState extends State<RecorderScreen>
             const Text('診斷版 0.0.2+2 · location-log v1'),
             _detail('無效紀錄行', '${_report?.invalidLines ?? 0}'),
             const SizedBox(height: 20),
-            FilledButton.icon(
-              onPressed: _busy ? null : _toggle,
-              icon: Icon(
-                status?.isRecording == true
-                    ? Icons.stop
-                    : Icons.fiber_manual_record,
+            if (status?.state == 'interrupted') ...[
+              FilledButton.icon(
+                onPressed: _busy ? null : _resume,
+                icon: const Icon(Icons.play_arrow),
+                label: const Text('繼續同一次記錄'),
               ),
-              label: Text(
-                status?.isRecording == true ||
-                        status?.state == 'waiting_permission'
-                    ? '停止記錄'
-                    : '開始記錄',
+              OutlinedButton.icon(
+                onPressed: _busy ? null : _finishInterrupted,
+                icon: const Icon(Icons.stop),
+                label: const Text('結束這次記錄'),
               ),
-            ),
+            ] else
+              FilledButton.icon(
+                onPressed: _busy ? null : _toggle,
+                icon: Icon(
+                  status?.isRecording == true
+                      ? Icons.stop
+                      : Icons.fiber_manual_record,
+                ),
+                label: Text(
+                  status?.isRecording == true ||
+                          status?.state == 'waiting_permission'
+                      ? '停止記錄'
+                      : '開始記錄',
+                ),
+              ),
             OutlinedButton.icon(
               onPressed: _busy || !stopped || status?.logPath == null
                   ? null
