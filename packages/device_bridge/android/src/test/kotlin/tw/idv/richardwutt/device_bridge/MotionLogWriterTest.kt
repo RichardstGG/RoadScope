@@ -56,6 +56,31 @@ class MotionLogWriterTest {
         assertFalse(q.observe(11_000_001, 11_000_000, 1_000_000))
         assertFalse(q.observe(9_000_000, 12_000_000, 1_000_000))
     }
+    @Test fun `late sources never use a future map and evicted history is explicit null`() {
+        val file = fixture("mapping-late-sources")
+        writer(file).use { w ->
+            w.start(utc, 1_000_000)
+            sources.forEach { w.clock(it.id, true, utc, 1_000_000) }
+            w.sample(sources[0], 999_000, 1_001_000, utc, "high", doubleArrayOf(0.0, 0.0, 9.8))
+            assertNull(w.lastSampleMapId) // Measurement predates the initial map.
+            w.map(utc + 100, 1_100_000, 2_000)
+            w.sample(sources[0], 1_110_000, 1_111_000, utc + 111, "high", doubleArrayOf(0.0, 0.0, 9.8))
+            assertEquals(1, w.lastSampleMapId)
+            w.sample(sources[1], 1_090_000, 1_112_000, utc + 112, "high", doubleArrayOf(0.0, 0.0, 0.0))
+            assertEquals(0, w.lastSampleMapId) // Late gyro retains a still-applicable older map.
+            repeat(5) { i -> w.map(utc + 200 + i, 1_200_000L + i * 1000, 2_000) }
+            w.sample(sources[2], 1_150_000, 1_210_000, utc + 210, "high", doubleArrayOf(1.0, 0.0, 0.0, 0.0))
+            assertNull(w.lastSampleMapId) // Bounded history must not invent a mapping.
+        }
+        val rows = file.readLines().map(::JSONObject)
+        val maps = rows.filter { it.optString("eventType") == "clock_map" }.associateBy { it.getInt("mapId") }
+        val samples = rows.filter { it.optString("recordType") == "motion_sample" }
+        for (sample in samples) {
+            if (sample.isNull("clockMapId")) assertTrue(sample.getJSONArray("qualityFlags").toString().contains("clock_map_unavailable"))
+            else assertTrue(sample.getLong("measurementMonotonicUs") >=
+                maps.getValue(sample.getInt("clockMapId")).getLong("effectiveFromMonotonicUs"))
+        }
+    }
     @Test fun `resume repairs only incomplete tail and keeps per-source sequence across boot`() {
         val file = fixture("boot-and-tail")
         writer(file).use { w ->

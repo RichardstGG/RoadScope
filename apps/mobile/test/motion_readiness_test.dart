@@ -108,4 +108,84 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     },
   );
+  testWidgets('stopped snapshot cannot enable stale left confirmation', (
+    tester,
+  ) async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          channel,
+          (call) async => call.method == 'motionStatus'
+              ? <String, Object?>{
+                  'state': 'idle',
+                  'leanState': 'available',
+                  'calibrationState': 'awaiting_left',
+                  'autoReferenceState': 'collecting',
+                }
+              : <String, Object?>{},
+        );
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(body: SingleChildScrollView(child: MotionReadiness())),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<OutlinedButton>(find.widgetWithText(OutlinedButton, '左傾確認'))
+          .onPressed,
+      isNull,
+    );
+    expect(
+      tester
+          .widget<OutlinedButton>(find.widgetWithText(OutlinedButton, '直立校準'))
+          .onPressed,
+      isNull,
+    );
+    expect(find.textContaining('未在採集'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets(
+    'automatic reference stays unknown and manual control remains available',
+    (tester) async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+            channel,
+            (call) async => call.method == 'motionStatus'
+                ? <String, Object?>{
+                    'state': 'recording',
+                    'leanState': 'available',
+                    'autoReferenceState': 'ready_axis_unknown',
+                    'autoReferenceDurationUs': 30000000,
+                    'leanAngleDeg': null,
+                    'maxLeft': null,
+                    'maxRight': null,
+                    'leanFlags': ['lean_axis_unknown'],
+                  }
+                : <String, Object?>{},
+          );
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(body: SingleChildScrollView(child: MotionReadiness())),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining('自動直立參考已建立'), findsOneWidget);
+      expect(find.textContaining('最久候選 30.0 秒'), findsOneWidget);
+      expect(find.textContaining('傾角 — · 最大左傾 — · 最大右傾 —'), findsOneWidget);
+      expect(
+        tester
+            .widget<OutlinedButton>(find.widgetWithText(OutlinedButton, '直立校準'))
+            .onPressed,
+        isNotNull,
+      );
+      expect(
+        tester
+            .widget<OutlinedButton>(find.widgetWithText(OutlinedButton, '左傾確認'))
+            .onPressed,
+        isNull,
+      );
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
 }

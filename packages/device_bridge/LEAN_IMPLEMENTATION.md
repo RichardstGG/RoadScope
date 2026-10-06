@@ -20,7 +20,9 @@ elapsed 與 uptime 差 ≥2 秒。無法區分時域保持 unverified，測量�
 此為保守工程起始門檻，尚無真機證據，不等於證明來源時鐘正確。
 
 stride=1，未降頻；每 0.5 秒與正常停止時 fsync。UTC offset 差 >2 ms
-新增 clock_map。每秒檢查空間，少於 256 MiB 停止 motion 並回報錯誤，
+新增 clock_map。保留最多 4 筆映射，晚到來源只用測量時刻已生效的映射，
+無可用映射時 clockMapId=null＋clock_map_unavailable，不套未來映射。
+每秒檢查空間，少於 256 MiB 停止 motion 並回報錯誤，
 GPS 不因此停止。約 180 MB/h 只是契約 fixture 粗估，待真機量測。
 缺口、非法輸入、buffer overflow 有事件；raw IO 失敗停止，不盲目重試。
 定位 boot authority 改變時停止 motion，要求重新開始，不默默串接時域。
@@ -37,13 +39,15 @@ EventChannel 最多 10 Hz 發布已寫出的估算，main looper 只留一個待
 不能直接把過彎 accelerometer 當直立方向。已接入 service：按直立收集 3 秒，
 再安全左傾 5–25 度確認並靜止 3 秒。僅停車安全支撐、前輪朝前時操作。
 窗口不合格會重算；取消流程不刪除既有有效校準。
-校準保存 sourceRange、實際窗口 spread 及左傾證據；生效時間晚於所有證據與舊估算。
+校準保存 sourceRange、實際窗口 spread 及左傾證據；等下一筆真實測量才生效，
+生效時間晚於所有證據與舊估算，不捏造未來 writtenMonotonicUs。
 
 lean writer 分段最大值以連續至少 100 ms 同側窗口的最小絕對角度作保守峰值，
 保存來源時間；重校準保存前段，無效值、跨 boot、逆序或 >100 ms 缺口
 清除窗口。規則尚需動態參考比較，不代表真實最大傾角準確度。
 
-融合起始版為 gyro-rest-up-experimental-v1：平台 quaternion 初始化 world-up，
+本版演算法標識為 gyro-rest-up-auto-experimental-v2（前版為 gyro-rest-up-experimental-v1）：
+融合仍為平台 quaternion 初始化 world-up，
 gyro Rodrigues 積分；只有 rest-like 輸入才以每筆 1% 慢速修正至平台姿態。
 rest-like 是 gyro ≤0.035 rad/s、比力量值距 g ≤0.4 m/s² 的工程判斷，
 不證明車輛停住；長緩彎可能誤判、gyro 會漂移、平台姿態可能被動態污染。
@@ -64,7 +68,7 @@ lean 恢復以串流掃描做序號與 raw 引用上界檢查；發現缺少 raw
 重校準與新 boot 的分段最大值從 null 開始。
 精準 GPS 對時仍須兩邊來源該時段都已驗證，不代表角度準確度。
 
-## 自動直立候選核心（尚未接入服務）
+## 自動直立參考
 
 `AutoUprightReference` 為純 Kotlin、有界、時間加權候選篩選器。
 只接受同 boot、已驗證測量時間的 GPS：速度 5–100 m/s、水平誤差 ≤10 m、
@@ -80,12 +84,26 @@ GPS 不合格均切斷未完成窗口，不補時間。gyro norm 是未知車軸
 
 最多 8 個方向群；累積最多者需 ≥30 秒，較次名多 ≥6 秒且 ≥1.5 倍才提出一次參考。
 第九群使自動選取保持不可用，不淘汰舊證據來製造勝者。reset 清除全部候選與 GPS。
-此核心只提出 upDevice 與證據，不推斷側傾軸、不輸出左右角度、不取代手動校準。
+自動參考只提出 upDevice 與證據，不推斷側傾軸、不取代手動校準。
 道路坡度、緩彎誤分類與融合漂移仍可能污染候選，不能宣稱真實直立或道路準確度。
 
-本版尚未接入 GPS 服務、lean_calibration 寫入與 UI：App 仍未啟用自動參考，
-沒有軸確認時保持未知。下一步是接入成功落盤的 GPS 品質快照、手動優先策略、
-unknown 軸自動校準記錄及配對 fixture，不能把核心單元測試當成整合完成。
+定位服務只有成功追加 GPS 後才交出品質 hint，單一 AtomicReference 合併最新 hint，
+不加入無界 GPS callback 佇列；motion writer 消費 hint、篩選及追加校準。
+已驗證 GPS 域依 Android location-log 的 measurementMonotonic 能力，另檢查
+測量時間不晚於接收，且必須同 boot；時間可比不等於感測器或道路角度準確。
+GPS 航向 accuracy 為即時品質 gate，既有 location-log 沒有此欄位，也不新增欄位。
+
+完成候選後於下一筆真實測量寫 origin=auto_straight_ride 校準，保留證據。
+leanAxisSource=unknown，正交單位向量只是 schema 所需的占位值，絕不參與角度計算；
+估算為 null＋lean_axis_unknown＋lean_unavailable，左右最大值亦 null。
+UI 顯示有效時間與方向未知原因，請停車完成手動校準，不要求行進中操作或刻意加速。
+手動流程中暫停候選；手動完成後自動參考不覆蓋。取消／輸入中斷清除候選及未生效校準，
+保留已生效的同 boot 校準；程序續錄與 boot 改變都不恢復有效校準。
+
+完整融合重播測試從 persisted raw epoch 起點讀到 estimate 的每個 sourceRef 終點，
+使用生產 LeanFusion 與已存校準，比較每筆非 null 角度（容差 1e-9 度），
+涵蓋動態力品質 gate、缺樣與時鐘失敗後新 epoch。這是合成重播一致性，
+不是獨立準確度驗證；自動候選選取沒有宣稱可由 GPS 檔重播（航向 accuracy 未存）。
 
 ## 驗證界線
 
@@ -93,14 +111,16 @@ unknown 軸自動校準記錄及配對 fixture，不能把核心單元測試當�
   缺樣、有界 buffer、合成幾何、手動校準、估算與峰值來源、品質閘門、
   重校準、lean 尾行修復、跨 boot、dangling raw 拒絕及 fsync barrier 呼叫。
   原生 motion／lean 合成輸出交 PR #10 同版驗證器逐檔及配對檢查，CI 固定契約 SHA。
-  原生共 61 項，其中自動候選核心 11 項；涵蓋不同 callback 密度、品質缺失、
+  原生共 67 項，其中自動候選核心 11 項；涵蓋不同 callback 密度、品質缺失、
   GPS freshness／逆序、方向群優勢、spread 上界及候選容量超限。
 - static：Dart UI 分析、原生採集生命週期整合及 Android 建置。
+  服務銷毀在 GPS owner 排入 motion 清理，另檢查啟動途中 destroyed，避免主執行緒
+  清理與 session 建立競態；真實 Android 銷毀／重建流程仍待 hardware 驗證。
 - manual / hardware：本版未測；background、頻率、時鐘驗證比例、
   低儲存量、實際 MB/h 與耗電待測。之前 GPS 長測不是本版證據。
 - untested：實際動態融合準確度／漂移、停車校準操作、EventChannel 背景生命週期、
   真正程序死亡／斷電的双檔耐久性、Android OEM accuracy、iOS runtime。
-  自動參考只有候選核心單元測試，服務／UI 整合及事後完整重播比較尚未實作；
-  合成配對通過不是完整重播證據。
+  自動參考已做原生管線合成整合／UI mock，真實 GPS 至服務交接仍未實測；
+  完整融合重播比對僅涵蓋合成案例，不涵蓋真機或重選自動校準。
 
 Android V1.0 基礎功能與 UI 真機通過前，不安排 iOS 真機測試。

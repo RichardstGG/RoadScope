@@ -234,6 +234,10 @@ class LocationRecorderService : Service(), LocationListener {
                 // Sensor setup is an independent diagnostic stream; GPS remains usable.
                 MotionSession.unavailable(id, error.message)
             }
+            if (destroyed) {
+                motion?.stop(); motion = null
+                return // Destruction may have happened during file recovery/startup.
+            }
             // The first callback cannot overtake recording_started: both run here.
             active = true
             locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f,
@@ -386,6 +390,17 @@ class LocationRecorderService : Service(), LocationListener {
                 // restarting it to avoid overlapping owners of the same file.
                 motion?.stop("Location boot domain changed; start a new recording to resume motion")
                 motion = null
+            } else {
+                // This hint is published only AFTER successful GPS append.
+                // No new location-log fields; bearing accuracy is a runtime
+                // quality gate, not a claim of replaying candidate selection.
+                val measurement = location.elapsedRealtimeNanos / 1000
+                val bearingAccuracy = if (Build.VERSION.SDK_INT >= 26 && location.hasBearingAccuracy())
+                    valid(location.bearingAccuracyDegrees) as? Double else null
+                motion?.rideFix(AutoUprightReference.Fix(writer.bootId, measurement,
+                    measurement >= 0 && measurement <= receivedMono,
+                    speed as? Double, horizontalAccuracy as? Double, speedAccuracy as? Double,
+                    heading as? Double, bearingAccuracy))
             }
         } catch (error: Exception) { fail(error) }
     }
@@ -409,13 +424,16 @@ class LocationRecorderService : Service(), LocationListener {
     }
 
     override fun onDestroy() {
-        motion?.stop(); motion = null
         destroyed = true
         active = false
         if (instance === this) instance = null
         locationManager.removeUpdates(this)
         // quitSafely still drains queued work, so the closing row can be written.
         handler.post {
+            // Same owner as startup/GPS hints. Main-thread destruction must not
+            // race creation and lose the newly created session reference.
+            motion?.stop(); motion = null
+            locationManager.removeUpdates(this)
             telemetry?.stop("stopped", "recorder service destroyed")
             telemetry = null
         }

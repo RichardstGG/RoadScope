@@ -11,6 +11,7 @@ import android.os.SystemClock
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.Semaphore
 import kotlin.math.sqrt
 
@@ -57,7 +58,11 @@ internal class MotionSession(private val context: Context, private val id: Strin
         id, version, boot, anchor, sources)
     private val lean = LeanLogWriter(File(File(context.filesDir, "motion"), "$id.lean.ndjson"),
         id, boot, version, sources.map { it.id }, { writer.counts }, { writer.sync(it) })
-    private val pipeline = LeanPipeline(lean, sources)
+    private val pipeline = LeanPipeline(lean, sources, boot)
+    private val rideHint = AtomicReference<AutoUprightReference.Fix?>(null)
+    fun rideFix(fix: AutoUprightReference.Fix) {
+        if (!stopping.get() && !failed) rideHint.set(fix) // Conflated, no queued GPS callbacks.
+    }
     private val controlPending = AtomicBoolean(false)
     private data class Packet(val source: MotionSource, val measured: Long, val received: Long,
         val uptime: Long, val utc: Long, val accuracy: String?, val values: DoubleArray,
@@ -187,17 +192,17 @@ internal class MotionSession(private val context: Context, private val id: Strin
                     check(context.filesDir.usableSpace >= 256L * 1024 * 1024) { "Motion recording stopped: less than 256 MiB free" }
                     val offset = packet.utc * 1000 - packet.received
                     if (offsetUs != null && kotlin.math.abs(offset - offsetUs!!) > 2_000) {
-                        writer.map(packet.utc, packet.received, 2_000,
-                            if (verified) packet.measured else packet.received)
+                        writer.map(packet.utc, packet.received, 2_000)
                         offsetUs = offset
                     }
                     checkedMapUs = packet.received
                 }
                 val sequence = writer.sample(packet.source, if (verified) packet.measured else null,
                     packet.received, packet.utc, packet.accuracy, packet.values)
+                rideHint.getAndSet(null)?.let { pipeline.rideFix(it) }
                 // Only a successful raw append may reach the estimator.
                 pipeline.consume(packet.source, sequence, if (verified) packet.measured else null,
-                    packet.received, packet.utc, packet.values, writer.currentMapId,
+                    packet.received, packet.utc, packet.values, writer.lastSampleMapId,
                     SystemClock.elapsedRealtimeNanos() / 1000, packet.accuracy)
                 if (packet.received - publishedUs >= 100_000) { publish("recording"); publishedUs = packet.received }
             }

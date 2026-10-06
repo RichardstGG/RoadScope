@@ -2,7 +2,7 @@ package tw.idv.richardwutt.device_bridge
 
 import kotlin.math.*
 
-/** Pure candidate selector, not yet connected to the recorder. Never infers a
+/** Pure candidate selector. Never infers a
  * motorcycle longitudinal axis or a signed lean angle. All thresholds below
  * are conservative engineering defaults, not road-accuracy claims.
  * Owner: the motion writer. No IO, timers, raw history or unbounded collections. */

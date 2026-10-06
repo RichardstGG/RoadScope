@@ -60,6 +60,10 @@ internal class MotionLogWriter(
     private val lastMeasurement = mutableMapOf<String, Long>()
     private var mapId = -1
     val currentMapId: Int get() = mapId
+    private data class Mapping(val id: Int, val from: Long)
+    private val mappings = ArrayDeque<Mapping>()
+    var lastSampleMapId: Int? = null
+        private set
     private var failed = false
     private var lastSyncUs = 0L
     val counts: Map<String, Long> get() = next.toMap()
@@ -136,6 +140,10 @@ internal class MotionLogWriter(
             .put("effectiveFromMonotonicUs", effectiveFrom).put("offsetUtcMinusMonotonicUs", utc * 1000 - mono)
             .put("mappingSource", "wall_clock_pair").put("uncertaintyUs", uncertainty))
         mapId = proposed
+        mappings.addLast(Mapping(proposed, effectiveFrom))
+        // Late samples may still precede a recent mapping. Keep a tiny bounded
+        // history; if no retained map applies, explicitly write null, not future.
+        while (mappings.size > 4) mappings.removeFirst()
     }
 
     fun clock(source: String, verified: Boolean, utc: Long, mono: Long) {
@@ -167,6 +175,7 @@ internal class MotionLogWriter(
                 measured, "sensor_interrupted", utc, received)
         }
         val sequence = next[source.id] ?: 0L
+        val sampleMap = mappings.lastOrNull { it.from <= (measured ?: received) }?.id
         val fields = when (source.kind) {
             "accelerometer" -> listOf("xMps2", "yMps2", "zMps2")
             "gyroscope" -> listOf("xRadPerS", "yRadPerS", "zRadPerS")
@@ -177,15 +186,17 @@ internal class MotionLogWriter(
         if (synthetic) flags.put("synthetic")
         if (measured == null) flags.put("measurement_monotonic_unavailable")
         if (accuracy == null) flags.put("accuracy_unavailable")
+        if (sampleMap == null) flags.put("clock_map_unavailable")
         val row = JSONObject().put("schemaVersion", 1).put("recordType", "motion_sample")
             .put("recordingId", id).put("deviceBootId", boot).put("sourceId", source.id)
             .put("sensorType", source.kind).put("sequence", sequence)
             .put("measurementMonotonicUs", measured ?: JSONObject.NULL)
             .put("receivedMonotonicUs", received).put("receivedAtUtc", Instant.ofEpochMilli(utc).toString())
-            .put("clockMapId", mapId).put("accuracyLevel", accuracy ?: JSONObject.NULL).put("qualityFlags", flags)
+            .put("clockMapId", sampleMap ?: JSONObject.NULL).put("accuracyLevel", accuracy ?: JSONObject.NULL).put("qualityFlags", flags)
         fields.forEachIndexed { i, field -> row.put(field, values[i]) }
         append(row)
         next[source.id] = sequence + 1
+        lastSampleMapId = sampleMap
         if (measured != null) lastMeasurement[source.id] = measured
         if (received - lastSyncUs >= 500_000) sync(received)
         return sequence

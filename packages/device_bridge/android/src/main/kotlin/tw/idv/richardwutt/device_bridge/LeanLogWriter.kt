@@ -18,7 +18,7 @@ internal class LeanLogWriter(private val file: File, private val id: String,
     private val inputs: List<String>, private val rawCounts: () -> Map<String, Long>,
     private val rawSync: (Long) -> Unit, private val synthetic: Boolean = false,
     private val appendOverride: ((ByteArray) -> Unit)? = null) : AutoCloseable {
-    companion object { const val ALGORITHM = "gyro-rest-up-experimental-v1" }
+    companion object { const val ALGORITHM = "gyro-rest-up-auto-experimental-v2" }
     private var stream: RandomAccessFile? = null
     private var next = 0L
     val count: Long get() = next
@@ -154,17 +154,18 @@ internal class LeanLogWriter(private val file: File, private val id: String,
         calibrationId = proposed; calibrationBoot = boot; lastTime = effective
         left = null; right = null; eligible = 0; ineligible = 0; window.clear()
     }
-    fun estimate(time: Long, computed: Long, angle: Double?, refs: Map<String, Long>, map: Int,
+    fun estimate(time: Long, computed: Long, angle: Double?, refs: Map<String, Long>, map: Int?,
         flags: List<String>, utc: Long): Long {
         check(!unavailable)
         val allFlags = flags.toMutableList()
         if (angle == null) allFlags.add("lean_unavailable")
         if (calibrationId == null) allFlags.add("no_valid_calibration")
+        if (map == null) allFlags.add("clock_map_unavailable")
         val valid = angle != null && flags.isEmpty() && calibrationId != null
         val sequence = record("lean_estimate", JSONObject().put("measurementMonotonicUs", time)
             .put("computedMonotonicUs", computed).put("leanAngleDeg", angle ?: JSONObject.NULL)
             .put("calibrationId", calibrationId ?: JSONObject.NULL).put("algorithmVersion", ALGORITHM)
-            .put("filterEpoch", epoch).put("clockMapId", map).put("extremumEligible", valid)
+            .put("filterEpoch", epoch).put("clockMapId", map ?: JSONObject.NULL).put("extremumEligible", valid)
             .put("sourceRefs", JSONArray(refs.map { (source, seq) -> JSONObject().put("sourceId", source)
                 .put("firstSequence", seq).put("lastSequence", seq) })), allFlags)
         if (calibrationId != null) { lastTime = time; if (valid) eligible++ else ineligible++ }
@@ -191,6 +192,29 @@ internal class LeanLogWriter(private val file: File, private val id: String,
         }
         if (computed - lastSync >= 500_000) sync(computed)
         return sequence
+    }
+    fun autoCalibrate(reference: AutoUprightReference.Reference, effective: Long, written: Long) {
+        require(effective > reference.toUs && effective <= written)
+        val up = reference.up
+        // Schema requires an orthogonal unit vector even for unknown axes.
+        // This is ONLY a placeholder, never a mounting/left-right inference.
+        val basis = listOf(LeanVector(1.0, 0.0, 0.0), LeanVector(0.0, 1.0, 0.0),
+            LeanVector(0.0, 0.0, 1.0)).minBy { abs(it.dot(up)) }
+        val previous = calibrationId
+        closeSegment(effective, "recalibrated")
+        val proposed = "calibration-$next"
+        record("lean_calibration", JSONObject().put("calibrationId", proposed)
+            .put("supersedesCalibrationId", previous ?: JSONObject.NULL).put("origin", "auto_straight_ride")
+            .put("effectiveFromMonotonicUs", effective).put("writtenMonotonicUs", written)
+            .put("upDevice", vector(up)).put("leanAxisDevice", vector(basis.cross(up).unit()!!))
+            .put("leanAxisSource", "unknown").put("leftLeanConfirmation", JSONObject.NULL)
+            .put("evidence", JSONObject().put("kind", "auto_straight")
+                .put("accumulatedDurationUs", reference.accumulatedDurationUs).put("windowCount", reference.windowCount)
+                .put("minSpeedMps", reference.minSpeedMps).put("maxYawRateRadPerS", reference.maxYawRateRadPerS)
+                .put("upSpreadDeg", reference.upSpreadDeg).put("sourceRange", range(reference.fromUs, reference.toUs)))
+            .put("carriedOverFromCalibrationId", JSONObject.NULL).put("algorithmVersion", ALGORITHM))
+        calibrationId = proposed; calibrationBoot = boot; lastTime = effective
+        left = null; right = null; eligible = 0; ineligible = 0; window.clear()
     }
     fun closeSegment(time: Long, reason: String) {
         val calibration = calibrationId ?: return

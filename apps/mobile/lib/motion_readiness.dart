@@ -97,9 +97,21 @@ class _MotionReadinessState extends State<MotionReadiness> {
     'collecting_upright' => '直立靜止收集中',
     'awaiting_left' => '直立完成，請安全左傾並確認',
     'collecting_left' => '左傾靜止收集中',
+    'activating_manual' => '證據完成，等待下一筆測量生效',
     'calibrated' => '已校準',
     _ => '尚未啟動流程',
   };
+
+  String get _automaticState => _status['state'] != 'recording'
+      ? '未在採集，開始記錄後才收集候選'
+      : switch (_status['autoReferenceState']) {
+          'manual_priority' => '手動校準優先，自動參考不覆蓋',
+          'manual_in_progress' => '手動校準進行中，自動收集暫停',
+          'ready_axis_unknown' => '自動直立參考已建立；左右方向未知，請停車完成手動校準',
+          'candidate_capacity_exceeded' => '候選方向過多，自動參考保持未知；請手動校準',
+          'collecting' => '等待合格 GPS 與穩定直行，累積有效時間',
+          _ => '尚未取得自動參考狀態',
+        };
 
   String _available(Object? value) => switch (value) {
     true => '可用',
@@ -123,7 +135,12 @@ class _MotionReadinessState extends State<MotionReadiness> {
       const Text(
         '僅停車且安全支撐時操作：保持車輛直立、前輪朝前，按直立並靜止 3 秒；再安全向左傾 5–25°，按左傾確認並靜止 3 秒。改變安裝或重開機／續錄後重新校準。',
       ),
-      const Text('自動直立參考尚未啟用；未完成手動校準時不顯示角度。'),
+      Text('自動參考：$_automaticState'),
+      if (_status['autoReferenceDurationUs'] case final num duration)
+        Text(
+          '最久候選 ${(duration / 1000000).toStringAsFixed(1)} 秒（至少 30 秒且需明確優勢）',
+        ),
+      const Text('自動參考只建立直立基準，不猜測左右方向。請勿為取得參考刻意加速或在行進中操作校準。'),
       Wrap(
         spacing: 8,
         children: [
@@ -138,7 +155,10 @@ class _MotionReadinessState extends State<MotionReadiness> {
           ),
           OutlinedButton(
             onPressed:
-                !_controlling && _status['calibrationState'] == 'awaiting_left'
+                !_controlling &&
+                    _status['state'] == 'recording' &&
+                    _status['leanState'] == 'available' &&
+                    _status['calibrationState'] == 'awaiting_left'
                 ? () => _calibrate('left')
                 : null,
             child: const Text('左傾確認'),

@@ -18,7 +18,7 @@ class LeanPipelineTest {
             ?: Files.createTempDirectory("lean-tests").toFile()
         return File(File(base, "native-lean-fixtures").apply { mkdirs() }, name)
     }
-    private inner class Harness(val name: String, boot: String = "boot-a", initial: Long = 1_000_000,
+    private inner class Harness(val name: String, val boot: String = "boot-a", initial: Long = 1_000_000,
         fresh: Boolean = true) : AutoCloseable {
         val motionFile = fixture("$name.motion.ndjson")
         val leanFile = fixture("$name.lean.ndjson")
@@ -26,7 +26,7 @@ class LeanPipelineTest {
         val raw = MotionLogWriter(motionFile, "synthetic-lean", "test", boot, utc - 1000, sources, synthetic = true)
         val log = LeanLogWriter(leanFile, "synthetic-lean", boot, "test", sources.map { it.id },
             { raw.counts }, { raw.sync(it) }, synthetic = true)
-        val pipeline = LeanPipeline(log, sources)
+        val pipeline = LeanPipeline(log, sources, boot)
         var time = initial
         private var roll = 0.0
         init { raw.start(utc, time); log.start(utc, time) }
@@ -58,6 +58,13 @@ class LeanPipelineTest {
             assertNotNull(log.calibrationId)
         }
         fun rows() = leanFile.readLines().map(::JSONObject)
+        fun ride(seconds: Int, quality: Boolean = true) {
+            repeat(seconds * 50) { i ->
+                if (i % 50 == 0) pipeline.rideFix(AutoUprightReference.Fix(boot, time, quality,
+                    10.0, 3.0, 0.5, 0.0, 2.0))
+                frame(0.0)
+            }
+        }
         override fun close() { log.close(); raw.close() }
     }
     @Test fun `quaternion up and gyro propagation use device axes with correct lean sign`() {
@@ -70,6 +77,67 @@ class LeanPipelineTest {
         val mount = LeanMount.fromLeftPose(LeanVector(0.0, 0.0, 1.0), f.up!!) // >25 rejected
         assertNull(mount)
         f.reset(); assertNull(f.up)
+    }
+    @Test fun `automatic reference is persisted after evidence but never guesses lean axis`() {
+        Harness("automatic-axis-unknown").use { h ->
+            repeat(60) { h.frame() }; h.ride(35)
+            val calibration = h.rows().single { it.optString("recordType") == "lean_calibration" }
+            assertEquals("auto_straight_ride", calibration.getString("origin"))
+            assertEquals("unknown", calibration.getString("leanAxisSource"))
+            assertTrue(calibration.isNull("leftLeanConfirmation"))
+            val evidence = calibration.getJSONObject("evidence")
+            assertEquals(30_000_000L, evidence.getLong("accumulatedDurationUs"))
+            assertTrue(calibration.getLong("effectiveFromMonotonicUs") >
+                evidence.getJSONObject("sourceRange").getLong("toMonotonicUs"))
+            assertNull(h.pipeline.snapshot["leanAngleDeg"])
+            assertEquals("ready_axis_unknown", h.pipeline.snapshot["autoReferenceState"])
+            h.pipeline.control("cancel")
+            assertEquals(calibration.getString("calibrationId"), h.log.calibrationId)
+            assertEquals(30_000_000L, h.pipeline.snapshot["autoReferenceDurationUs"])
+            val estimates = h.rows().filter { it.optString("recordType") == "lean_estimate" && !it.isNull("calibrationId") }
+            assertTrue(estimates.isNotEmpty())
+            assertTrue(estimates.all { it.isNull("leanAngleDeg") && !it.getBoolean("extremumEligible") &&
+                it.getJSONArray("qualityFlags").toString().contains("lean_axis_unknown") })
+            assertTrue(h.log.maxima.values.all { it == null })
+            h.pipeline.stopped(h.time, "recording_stopped")
+        }
+    }
+    @Test fun `manual supersedes automatic and future ride cannot replace manual calibration`() {
+        Harness("automatic-to-manual").use { h ->
+            repeat(60) { h.frame() }; h.ride(35)
+            val auto = h.log.calibrationId!!
+            h.calibrate()
+            val manual = h.log.calibrationId!!
+            assertNotEquals(auto, manual)
+            h.ride(40)
+            assertEquals(manual, h.log.calibrationId)
+            assertEquals("manual_priority", h.pipeline.snapshot["autoReferenceState"])
+            val calibration = h.rows().last { it.optString("recordType") == "lean_calibration" }
+            assertEquals(auto, calibration.getString("supersedesCalibrationId"))
+            assertEquals("manual_upright", calibration.getString("origin"))
+            h.pipeline.stopped(h.time, "recording_stopped")
+        }
+    }
+    @Test fun `unverified gps cannot produce an automatic reference`() {
+        Harness("automatic-gps-unverified").use { h ->
+            repeat(60) { h.frame() }; h.ride(40, quality = false)
+            assertNull(h.log.calibrationId)
+            assertEquals(0L, h.pipeline.snapshot["autoReferenceDurationUs"])
+            h.pipeline.stopped(h.time, "recording_stopped")
+        }
+    }
+    @Test fun `input interruption discards automatic candidate duration`() {
+        Harness("automatic-gap-reset").use { h ->
+            repeat(60) { h.frame() }; h.ride(28)
+            assertNotEquals(0L, h.pipeline.snapshot["autoReferenceDurationUs"])
+            h.raw.dropped(sources[0].id, 1, null, null, "buffer_full", utc + h.time / 1000, h.time + 1000)
+            h.pipeline.interrupted("after_input_gap", utc + h.time / 1000, h.time + 1000)
+            h.ride(10)
+            assertNull(h.log.calibrationId)
+            h.ride(25)
+            assertNotNull(h.log.calibrationId)
+            h.pipeline.stopped(h.time, "recording_stopped")
+        }
     }
     @Test fun `manual calibration persisted estimate and conservative maxima have raw references`() {
         Harness("manual-and-peaks").use { h ->
@@ -193,6 +261,9 @@ class LeanPipelineTest {
             repeat(20) { h.frame(0.0) }
             h.pipeline.control("upright"); repeat(152) { h.frame(0.0) }
             h.frame(15.0); h.pipeline.control("left"); repeat(151) { h.frame(15.0) }
+            assertEquals("activating_manual", h.pipeline.snapshot["calibrationState"])
+            assertEquals(old, h.log.calibrationId)
+            h.frame(15.0) // Actual next measurement activates; no invented future write time.
             assertNotEquals(old, h.log.calibrationId)
             assertNull(h.log.maxima["maxLeft"])
             val closed = h.rows().single { it.optString("recordType") == "lean_segment_closed" }
@@ -210,6 +281,19 @@ class LeanPipelineTest {
             assertEquals("unavailable", h.pipeline.snapshot["leanState"])
             assertEquals("idle", h.pipeline.snapshot["calibrationState"])
             assertNull(h.pipeline.snapshot["leanAngleDeg"])
+        }
+    }
+    @Test fun `stored full epoch inputs reproduce every nonnull estimate across resets`() {
+        Harness("full-epoch-replay").use { h ->
+            h.calibrate()
+            repeat(200) { h.frame(20.0 * sin(it / 40.0), force = if (it in 80..90) 12.0 else 9.80665) }
+            h.raw.dropped(sources[1].id, 2, null, null, "buffer_full", utc + h.time / 1000, h.time + 1000)
+            h.pipeline.interrupted("after_input_gap", utc + h.time / 1000, h.time + 1000)
+            repeat(150) { h.frame(12.0 * sin(it / 30.0)) }
+            h.frame(verified = false)
+            repeat(120) { h.frame(-5.0) }
+            h.pipeline.stopped(h.time, "recording_stopped")
+            assertTrue(LeanReplayAssertions.verify(h.motionFile, h.leanFile) > 100)
         }
     }
 }
