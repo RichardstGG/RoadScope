@@ -1,0 +1,303 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.roadscope.invalid/motion-lean/v1/lean.schema.json",
+  "title": "RoadScope derived lean log record, schemaVersion 1",
+  "description": "One NDJSON line of the derived lean log (calibrations, estimates, per-segment extrema). See contracts/motion-lean/v1/README.md for the normative text.",
+  "oneOf": [
+    { "$ref": "#/$defs/leanCalibration" },
+    { "$ref": "#/$defs/leanEstimate" },
+    { "$ref": "#/$defs/leanExtremum" },
+    { "$ref": "#/$defs/leanSegmentClosed" },
+    { "$ref": "#/$defs/leanEvent" }
+  ],
+  "$defs": {
+    "leanRecordBase": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "recordingId": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "sourceId": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "deviceBootId": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "sequence": { "$ref": "common.schema.json#/$defs/sequence" },
+        "qualityFlags": { "$ref": "common.schema.json#/$defs/qualityFlags" }
+      },
+      "required": ["schemaVersion", "recordingId", "sourceId", "deviceBootId", "sequence", "qualityFlags"]
+    },
+    "calibrationEvidence": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "manual_rest" },
+            "restDurationUs": { "type": "integer", "minimum": 1 },
+            "upSpreadDeg": { "type": "number", "minimum": 0 },
+            "sourceRange": { "$ref": "common.schema.json#/$defs/monotonicRange" }
+          },
+          "required": ["kind", "restDurationUs", "upSpreadDeg", "sourceRange"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "auto_straight" },
+            "accumulatedDurationUs": { "type": "integer", "minimum": 1 },
+            "windowCount": { "type": "integer", "minimum": 1 },
+            "minSpeedMps": { "type": "number", "minimum": 0 },
+            "maxYawRateRadPerS": { "type": "number", "minimum": 0 },
+            "upSpreadDeg": { "type": "number", "minimum": 0 },
+            "sourceRange": { "$ref": "common.schema.json#/$defs/monotonicRange" }
+          },
+          "required": [
+            "kind", "accumulatedDurationUs", "windowCount", "minSpeedMps",
+            "maxYawRateRadPerS", "upSpreadDeg", "sourceRange"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "leftLeanConfirmation": {
+      "type": "object",
+      "properties": {
+        "peakLeanMagnitudeDeg": { "type": "number", "minimum": 0, "maximum": 90 },
+        "durationUs": { "type": "integer", "minimum": 1 },
+        "sourceRange": { "$ref": "common.schema.json#/$defs/monotonicRange" }
+      },
+      "required": ["peakLeanMagnitudeDeg", "durationUs", "sourceRange"],
+      "additionalProperties": false
+    },
+    "leanCalibration": {
+      "properties": {
+        "recordType": { "const": "lean_calibration" },
+        "calibrationId": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "supersedesCalibrationId": { "type": ["string", "null"], "minLength": 1 },
+        "origin": { "enum": ["manual_upright", "auto_straight_ride", "carried_over"] },
+        "effectiveFromMonotonicUs": { "$ref": "common.schema.json#/$defs/monotonicUs" },
+        "writtenMonotonicUs": { "$ref": "common.schema.json#/$defs/monotonicUs" },
+        "upDevice": { "$ref": "common.schema.json#/$defs/unitVector3" },
+        "leanAxisDevice": { "$ref": "common.schema.json#/$defs/unitVector3" },
+        "leanAxisSource": { "type": "string", "minLength": 1 },
+        "leftLeanConfirmation": { "oneOf": [{ "$ref": "#/$defs/leftLeanConfirmation" }, { "type": "null" }] },
+        "evidence": { "oneOf": [{ "$ref": "#/$defs/calibrationEvidence" }, { "type": "null" }] },
+        "carriedOverFromCalibrationId": { "type": ["string", "null"], "minLength": 1 },
+        "algorithmVersion": { "$ref": "common.schema.json#/$defs/nonEmptyString" }
+      },
+      "required": [
+        "recordType", "calibrationId", "supersedesCalibrationId", "origin",
+        "effectiveFromMonotonicUs", "writtenMonotonicUs", "upDevice", "leanAxisDevice",
+        "leanAxisSource", "leftLeanConfirmation", "evidence", "carriedOverFromCalibrationId",
+        "algorithmVersion"
+      ],
+      "allOf": [
+        { "$ref": "#/$defs/leanRecordBase" },
+        {
+          "if": { "properties": { "origin": { "const": "manual_upright" } } },
+          "then": { "properties": { "evidence": { "type": "object", "properties": { "kind": { "const": "manual_rest" } } } } }
+        },
+        {
+          "if": { "properties": { "origin": { "const": "auto_straight_ride" } } },
+          "then": { "properties": { "evidence": { "type": "object", "properties": { "kind": { "const": "auto_straight" } } } } }
+        },
+        {
+          "if": { "properties": { "origin": { "const": "carried_over" } } },
+          "then": {
+            "properties": {
+              "evidence": { "type": "null" },
+              "carriedOverFromCalibrationId": { "type": "string" }
+            }
+          },
+          "else": { "properties": { "carriedOverFromCalibrationId": { "type": "null" } } }
+        },
+        {
+          "if": { "properties": { "leanAxisSource": { "const": "manual_left_lean" } } },
+          "then": { "properties": { "leftLeanConfirmation": { "type": "object" } } },
+          "else": { "properties": { "leftLeanConfirmation": { "type": "null" } } }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "sourceRef": {
+      "type": "object",
+      "properties": {
+        "sourceId": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "firstSequence": { "$ref": "common.schema.json#/$defs/sequence" },
+        "lastSequence": { "$ref": "common.schema.json#/$defs/sequence" }
+      },
+      "required": ["sourceId", "firstSequence", "lastSequence"],
+      "additionalProperties": false
+    },
+    "leanEstimate": {
+      "allOf": [{ "$ref": "#/$defs/leanRecordBase" }],
+      "properties": {
+        "recordType": { "const": "lean_estimate" },
+        "measurementMonotonicUs": { "$ref": "common.schema.json#/$defs/monotonicUs" },
+        "computedMonotonicUs": { "$ref": "common.schema.json#/$defs/monotonicUs" },
+        "leanAngleDeg": { "type": ["number", "null"], "minimum": -90, "maximum": 90 },
+        "calibrationId": { "type": ["string", "null"], "minLength": 1 },
+        "algorithmVersion": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "sourceRefs": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/sourceRef" } },
+        "clockMapId": { "type": ["integer", "null"], "minimum": 0 },
+        "extremumEligible": { "type": "boolean" }
+      },
+      "required": [
+        "recordType", "measurementMonotonicUs", "computedMonotonicUs", "leanAngleDeg",
+        "calibrationId", "algorithmVersion", "sourceRefs", "clockMapId", "extremumEligible"
+      ],
+      "unevaluatedProperties": false
+    },
+    "leanExtremum": {
+      "allOf": [{ "$ref": "#/$defs/leanRecordBase" }],
+      "properties": {
+        "recordType": { "const": "lean_extremum" },
+        "calibrationId": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "side": { "enum": ["left", "right"] },
+        "peakAbsAngleDeg": { "type": "number", "minimum": 0, "maximum": 90 },
+        "eventMonotonicUs": { "$ref": "common.schema.json#/$defs/monotonicUs" },
+        "estimateSequence": { "$ref": "common.schema.json#/$defs/sequence" },
+        "windowStartMonotonicUs": { "$ref": "common.schema.json#/$defs/monotonicUs" },
+        "windowEndMonotonicUs": { "$ref": "common.schema.json#/$defs/monotonicUs" },
+        "policyVersion": { "$ref": "common.schema.json#/$defs/nonEmptyString" }
+      },
+      "required": [
+        "recordType", "calibrationId", "side", "peakAbsAngleDeg", "eventMonotonicUs",
+        "estimateSequence", "windowStartMonotonicUs", "windowEndMonotonicUs", "policyVersion"
+      ],
+      "unevaluatedProperties": false
+    },
+    "segmentExtremum": {
+      "type": "object",
+      "properties": {
+        "peakAbsAngleDeg": { "type": "number", "minimum": 0, "maximum": 90 },
+        "eventMonotonicUs": { "$ref": "common.schema.json#/$defs/monotonicUs" },
+        "extremumSequence": { "$ref": "common.schema.json#/$defs/sequence" }
+      },
+      "required": ["peakAbsAngleDeg", "eventMonotonicUs", "extremumSequence"],
+      "additionalProperties": false
+    },
+    "leanSegmentClosed": {
+      "allOf": [{ "$ref": "#/$defs/leanRecordBase" }],
+      "properties": {
+        "recordType": { "const": "lean_segment_closed" },
+        "calibrationId": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "closedAtMonotonicUs": { "$ref": "common.schema.json#/$defs/monotonicUs" },
+        "closeReason": {
+          "enum": ["recalibrated", "calibration_invalidated", "recording_stopped", "boot_changed", "recording_interrupted"]
+        },
+        "maxLeft": { "oneOf": [{ "$ref": "#/$defs/segmentExtremum" }, { "type": "null" }] },
+        "maxRight": { "oneOf": [{ "$ref": "#/$defs/segmentExtremum" }, { "type": "null" }] },
+        "eligibleEstimateCount": { "type": "integer", "minimum": 0 },
+        "ineligibleEstimateCount": { "type": "integer", "minimum": 0 }
+      },
+      "required": [
+        "recordType", "calibrationId", "closedAtMonotonicUs", "closeReason", "maxLeft",
+        "maxRight", "eligibleEstimateCount", "ineligibleEstimateCount"
+      ],
+      "unevaluatedProperties": false
+    },
+    "leanEventBase": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "recordType": { "const": "lean_event" },
+        "eventType": { "type": "string" },
+        "recordingId": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "sourceId": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "deviceBootId": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "occurredAtUtc": { "$ref": "common.schema.json#/$defs/utcTimestamp" },
+        "occurredMonotonicUs": { "$ref": "common.schema.json#/$defs/monotonicUs" },
+        "lastSequence": { "type": "integer", "minimum": -1 }
+      },
+      "required": [
+        "schemaVersion", "recordType", "eventType", "recordingId", "sourceId",
+        "deviceBootId", "occurredAtUtc", "occurredMonotonicUs", "lastSequence"
+      ]
+    },
+    "leanEvent": {
+      "oneOf": [
+        { "$ref": "#/$defs/eventLeanStarted" },
+        { "$ref": "#/$defs/eventCalibrationInvalidated" },
+        { "$ref": "#/$defs/eventRecordsDropped" },
+        { "$ref": "#/$defs/eventClockAdjusted" },
+        { "$ref": "#/$defs/eventLogTruncated" },
+        { "$ref": "#/$defs/eventRecordingResumed" }
+      ]
+    },
+    "eventLeanStarted": {
+      "allOf": [{ "$ref": "#/$defs/leanEventBase" }],
+      "properties": {
+        "eventType": { "const": "lean_started" },
+        "platform": { "$ref": "common.schema.json#/$defs/platform" },
+        "appVersion": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "algorithmVersion": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "inputSourceIds": { "type": "array", "minItems": 1, "items": { "$ref": "common.schema.json#/$defs/nonEmptyString" } },
+        "maxInputGapUs": { "type": "integer", "minimum": 1 },
+        "extremumPolicy": {
+          "type": "object",
+          "properties": {
+            "policyVersion": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+            "rule": { "enum": ["min_abs_in_same_side_window"] },
+            "minWindowUs": { "type": "integer", "minimum": 1 }
+          },
+          "required": ["policyVersion", "rule", "minWindowUs"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["eventType", "platform", "appVersion", "algorithmVersion", "inputSourceIds", "maxInputGapUs", "extremumPolicy"],
+      "unevaluatedProperties": false
+    },
+    "eventCalibrationInvalidated": {
+      "allOf": [{ "$ref": "#/$defs/leanEventBase" }],
+      "properties": {
+        "eventType": { "const": "calibration_invalidated" },
+        "calibrationId": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "invalidatedAtMonotonicUs": { "$ref": "common.schema.json#/$defs/monotonicUs" },
+        "reason": { "enum": ["mount_shift_detected", "evidence_expired", "user_cleared", "manual_replaced", "auto_replaced"] }
+      },
+      "required": ["eventType", "calibrationId", "invalidatedAtMonotonicUs", "reason"],
+      "unevaluatedProperties": false
+    },
+    "eventRecordsDropped": {
+      "allOf": [{ "$ref": "#/$defs/leanEventBase" }],
+      "properties": {
+        "eventType": { "const": "records_dropped" },
+        "droppedCount": { "type": "integer", "minimum": 1 },
+        "firstDroppedMonotonicUs": { "oneOf": [{ "$ref": "common.schema.json#/$defs/monotonicUs" }, { "type": "null" }] },
+        "lastDroppedMonotonicUs": { "oneOf": [{ "$ref": "common.schema.json#/$defs/monotonicUs" }, { "type": "null" }] },
+        "reason": { "enum": ["buffer_full", "writer_error", "recording_paused"] }
+      },
+      "required": ["eventType", "droppedCount", "firstDroppedMonotonicUs", "lastDroppedMonotonicUs", "reason"],
+      "unevaluatedProperties": false
+    },
+    "eventClockAdjusted": {
+      "allOf": [{ "$ref": "#/$defs/leanEventBase" }],
+      "properties": {
+        "eventType": { "const": "clock_adjusted" },
+        "previousDeviceBootId": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "previousBootAnchorUtcMs": { "type": "integer" },
+        "bootAnchorUtcMs": { "type": "integer" },
+        "thresholdMs": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["eventType", "previousDeviceBootId", "previousBootAnchorUtcMs", "bootAnchorUtcMs", "thresholdMs"],
+      "unevaluatedProperties": false
+    },
+    "eventLogTruncated": {
+      "allOf": [{ "$ref": "#/$defs/leanEventBase" }],
+      "properties": {
+        "eventType": { "const": "log_truncated" },
+        "truncatedBytes": { "type": "integer", "minimum": 1 },
+        "resumedSequence": { "$ref": "common.schema.json#/$defs/sequence" }
+      },
+      "required": ["eventType", "truncatedBytes", "resumedSequence"],
+      "unevaluatedProperties": false
+    },
+    "eventRecordingResumed": {
+      "allOf": [{ "$ref": "#/$defs/leanEventBase" }],
+      "properties": {
+        "eventType": { "const": "recording_resumed" },
+        "reason": { "$ref": "common.schema.json#/$defs/resumeReason" },
+        "resumedSequence": { "$ref": "common.schema.json#/$defs/sequence" }
+      },
+      "required": ["eventType", "reason", "resumedSequence"],
+      "unevaluatedProperties": false
+    }
+  }
+}
