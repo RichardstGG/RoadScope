@@ -5,6 +5,7 @@ package tw.idv.richardwutt.device_bridge
 internal fun motionSnapshotAt(value: Map<String, Any?>, now: Long): Map<String, Any?> {
     val measured = value["leanMeasurementUs"] as? Long ?: return value
     return if (measured > now || now - measured > 500_000)
-        value + mapOf("leanAngleDeg" to null, "leanState" to "unavailable", "leanFlags" to listOf("input_stale"))
+        value + mapOf("leanAngleDeg" to null, "leanState" to "unavailable", "leanFlags" to listOf("input_stale"),
+            "leanBlockReason" to "input_stale", "leanBlockedSourceIds" to emptyList<String>())
     else value
 }

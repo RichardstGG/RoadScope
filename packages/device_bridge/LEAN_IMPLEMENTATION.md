@@ -28,6 +28,13 @@ GPS 不因此停止。約 180 MB/h 只是契約 fixture 粗估，待真機量測
 定位 boot authority 改變時停止 motion，要求重新開始，不默默串接時域。
 
 UI 顯示能力、樣本數、時鐘狀態、錯誤與車把轉向誤差提示。
+motionStatus／EventChannel 新增可選診斷欄位 `leanBlockReason`、
+`leanBlockedSourceIds`、`sensorAccuracy`（每來源最近成功寫入樣本的原始品質，非即時保證）。
+以所有來源彙整時鐘與 accuracy 阻擋，健康來源不會掩蓋另一來源不可靠。
+舊 plugin 未提供時顯示尚未取得診斷，iOS 不因缺欄位失敗。
+同為 unavailable 但原因改變時追加既有契約 estimator_state；相同原因不重複寫入。
+accuracy 阻擋以契約已有的 input_interrupted 記錄，具體來源與品質看原始 motion／UI，
+不新增契約欄位或原因列舉，也不改寫舊紀錄。品質恢复需完整新輸入與新 epoch。
 狀態取自記憶體小快照，不讀完整高頻檔案。正常停止後可主動分開分享 motion／lean。
 EventChannel 最多 10 Hz 發布已寫出的估算，main looper 只留一個待送快照。
 超過 500 ms 的舊角度隱藏；IO watchdog 每 250 ms 檢查靜默中斷並記 unavailable。
@@ -111,13 +118,17 @@ UI 顯示有效時間與方向未知原因，請停車完成手動校準，不�
   缺樣、有界 buffer、合成幾何、手動校準、估算與峰值來源、品質閘門、
   重校準、lean 尾行修復、跨 boot、dangling raw 拒絕及 fsync barrier 呼叫。
   原生 motion／lean 合成輸出交 PR #10 同版驗證器逐檔及配對檢查，CI 固定契約 SHA。
-  原生共 67 項，其中自動候選核心 11 項；涵蓋不同 callback 密度、品質缺失、
+  原生共 69 項，其中自動候選核心 11 項；涵蓋不同 callback 密度、品質缺失、
   GPS freshness／逆序、方向群優勢、spread 上界及候選容量超限。
 - static：Dart UI 分析、原生採集生命週期整合及 Android 建置。
   服務銷毀在 GPS owner 排入 motion 清理，另檢查啟動途中 destroyed，避免主執行緒
   清理與 session 建立競態；真實 Android 銷毀／重建流程仍待 hardware 驗證。
-- manual / hardware：本版未測；background、頻率、時鐘驗證比例、
-  低儲存量、實際 MB/h 與耗電待測。之前 GPS 長測不是本版證據。
+- manual / hardware：前版 ba460d0 在 Xiaomi 21081111RG／Android 14 正常開始與停止。
+  約 562.66 秒、87,721 筆 motion，每來源約 51.91 Hz，無序號缺口或 >100 ms 間隔，
+  三來源時鐘均驗證通過；加速度全程 unreliable、gyro／attitude high，零 lean 估算。
+  三檔契約與配對零錯誤／警告。這是品質阻擋案例，不是校準或傾角精度驗收。
+  USB 全程連接，非電池／背景耐久測試。修正後版本尚需實測；background、
+  低儲存量、耗電待測。之前 GPS 長測不是本版證據。
 - untested：實際動態融合準確度／漂移、停車校準操作、EventChannel 背景生命週期、
   真正程序死亡／斷電的双檔耐久性、Android OEM accuracy、iOS runtime。
   自動參考已做原生管線合成整合／UI mock，真實 GPS 至服務交接仍未實測；

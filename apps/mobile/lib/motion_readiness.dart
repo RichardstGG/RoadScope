@@ -93,6 +93,20 @@ class _MotionReadinessState extends State<MotionReadiness> {
   String _angle(Object? value) =>
       value is num ? '${value.toStringAsFixed(1)}°' : '—';
 
+  String get _blockReason => switch (_status['leanBlockReason']) {
+    'awaiting_inputs' => '等待各來源第一筆資料',
+    'input_clock_not_verified' => '感測測量時鐘尚未驗證',
+    'sensor_unavailable' => '缺少必要感測器',
+    'sensor_accuracy_unreliable' => '感測器回報不可靠，已停止傾角估算與校準',
+    'sensor_accuracy_unavailable' => '感測器未提供品質，已停止傾角估算與校準',
+    'raw_write_failed' => '原始感測資料寫入失敗',
+    'input_interrupted' => '感測輸入中斷，等待完整新輸入',
+    'input_stale' => '傾角輸入已逾期，已隱藏舊角度',
+    'recording_stopped' => '記錄已停止',
+    null => _status['leanState'] == 'available' ? '無輸入阻擋' : '尚未取得診斷',
+    _ => '未知原因：${_status['leanBlockReason']}',
+  };
+
   String get _calibrationState => switch (_status['calibrationState']) {
     'collecting_upright' => '直立靜止收集中',
     'awaiting_left' => '直立完成，請安全左傾並確認',
@@ -104,6 +118,8 @@ class _MotionReadinessState extends State<MotionReadiness> {
 
   String get _automaticState => _status['state'] != 'recording'
       ? '未在採集，開始記錄後才收集候選'
+      : _status['leanState'] == 'unavailable'
+      ? '感測輸入未就緒，自動收集暫停'
       : switch (_status['autoReferenceState']) {
           'manual_priority' => '手動校準優先，自動參考不覆蓋',
           'manual_in_progress' => '手動校準進行中，自動收集暫停',
@@ -130,6 +146,16 @@ class _MotionReadinessState extends State<MotionReadiness> {
       ),
       const Text('實驗性估算：負值左傾、正值右傾，尚未驗證道路準確度。品質不合格不計最大值。'),
       Text('校準：$_calibrationState · 品質：${_status['leanFlags'] ?? '—'}'),
+      Text('傾角輸入：$_blockReason'),
+      if (_status['leanBlockedSourceIds'] case final List ids)
+        if (ids.isNotEmpty) Text('阻擋來源：${ids.join(', ')}'),
+      if (_status['sensorAccuracy'] case final Map accuracy)
+        Text('最近已存樣本的平台品質：$accuracy'),
+      if (_status['leanBlockReason'] == 'sensor_accuracy_unreliable' ||
+          _status['leanBlockReason'] == 'sensor_accuracy_unavailable')
+        const Text(
+          '直立校準只設定安裝參考，不能修復感測器品質。請先保持手機靜止檢查；若持續不可靠，停止並匯出診斷，不進行道路傾角驗收。',
+        ),
       if (_status['calibrationProgress'] case final num progress)
         LinearProgressIndicator(value: progress.toDouble()),
       const Text(

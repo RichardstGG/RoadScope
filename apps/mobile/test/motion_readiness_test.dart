@@ -55,6 +55,55 @@ void main() {
   });
 
   testWidgets(
+    'verified clocks do not hide unreliable sensor calibration blocker',
+    (tester) async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+            channel,
+            (call) async => call.method == 'motionStatus'
+                ? <String, Object?>{
+                    'state': 'recording',
+                    'leanState': 'unavailable',
+                    'leanBlockReason': 'sensor_accuracy_unreliable',
+                    'leanBlockedSourceIds': ['android-accelerometer'],
+                    'sensorAccuracy': {
+                      'android-accelerometer': 'unreliable',
+                      'android-gyroscope': 'high',
+                    },
+                    'clockStates': {
+                      'android-accelerometer': 'elapsed_realtime',
+                    },
+                  }
+                : <String, Object?>{},
+          );
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(body: SingleChildScrollView(child: MotionReadiness())),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining('感測器回報不可靠'), findsOneWidget);
+      expect(find.text('阻擋來源：android-accelerometer'), findsOneWidget);
+      expect(find.textContaining('不能修復感測器品質'), findsOneWidget);
+      expect(find.textContaining('感測輸入未就緒，自動收集暫停'), findsOneWidget);
+      expect(find.textContaining('傾角 — · 最大左傾 — · 最大右傾 —'), findsOneWidget);
+      expect(
+        tester
+            .widget<OutlinedButton>(find.widgetWithText(OutlinedButton, '直立校準'))
+            .onPressed,
+        isNull,
+      );
+      expect(
+        tester
+            .widget<OutlinedButton>(find.widgetWithText(OutlinedButton, '左傾確認'))
+            .onPressed,
+        isNull,
+      );
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets(
     'calibration controls use native state and display persisted estimates',
     (tester) async {
       final calls = <MethodCall>[];

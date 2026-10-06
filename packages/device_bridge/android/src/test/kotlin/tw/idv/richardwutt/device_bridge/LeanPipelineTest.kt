@@ -30,7 +30,8 @@ class LeanPipelineTest {
         var time = initial
         private var roll = 0.0
         init { raw.start(utc, time); log.start(utc, time) }
-        fun frame(angle: Double = roll, verified: Boolean = true, force: Double = 9.80665) {
+        fun frame(angle: Double = roll, verified: Boolean = true, force: Double = 9.80665,
+            accuracies: List<String?> = listOf("high", "high", "high")) {
             time += 20_000
             val radians = Math.toRadians(angle)
             val rate = Math.toRadians(angle - roll) / 0.02
@@ -42,9 +43,9 @@ class LeanPipelineTest {
                 raw.clock(source.id, verified, utc + time / 1000, time + 1000)
                 if (previous != raw.clockStates[source.id]) pipeline.interrupted("input_clock_state_change", utc + time / 1000, time + 1000)
                 val sequence = raw.sample(source, if (verified) time else null, time + 1000,
-                    utc + time / 1000, "high", values[index])
+                    utc + time / 1000, accuracies[index], values[index])
                 pipeline.consume(source, sequence, if (verified) time else null, time + 1000,
-                    utc + time / 1000, values[index], raw.currentMapId, time + 2000)
+                    utc + time / 1000, values[index], raw.currentMapId, time + 2000, accuracies[index])
             }
         }
         fun calibrate() {
@@ -157,6 +158,42 @@ class LeanPipelineTest {
             assertThrows(IllegalStateException::class.java) { h.pipeline.control("upright") }
         }
     }
+    @Test fun `persistent unreliable acceleration replaces clock reason without flooding events`() {
+        Harness("persistent-accuracy-blocker").use { h ->
+            repeat(32) { h.frame(verified = false, accuracies = listOf("unreliable", "high", "high")) }
+            repeat(500) { h.frame(accuracies = listOf("unreliable", "high", "high")) }
+            val status = h.pipeline.snapshot
+            assertEquals("sensor_accuracy_unreliable", status["leanBlockReason"])
+            assertEquals(listOf(sources[0].id), status["leanBlockedSourceIds"])
+            assertEquals("unreliable", (status["sensorAccuracy"] as Map<*, *>)[sources[0].id])
+            assertEquals("unavailable", status["leanState"])
+            assertThrows(IllegalStateException::class.java) { h.pipeline.control("upright") }
+            assertFalse(h.rows().any { it.optString("recordType") == "lean_estimate" })
+            val states = h.rows().filter { it.optString("eventType") == "estimator_state" }
+            assertEquals(listOf("input_clock_not_verified", "input_interrupted"), states.map { it.getString("reason") })
+            h.pipeline.stopped(h.time, "recording_stopped")
+        }
+    }
+    @Test fun `quality recovery clears blocker only after fresh complete inputs and new epoch`() {
+        Harness("accuracy-recovery").use { h ->
+            h.calibrate()
+            val epoch = h.log.epoch
+            val max = h.log.maxima
+            repeat(20) { h.frame(accuracies = listOf("high", null, "high")) }
+            assertEquals("sensor_accuracy_unavailable", h.pipeline.snapshot["leanBlockReason"])
+            assertEquals(listOf(sources[1].id), h.pipeline.snapshot["leanBlockedSourceIds"])
+            assertNull(h.pipeline.snapshot["leanAngleDeg"])
+            assertEquals(max, h.log.maxima)
+            repeat(60) { h.frame() }
+            assertTrue(h.log.epoch > epoch)
+            assertEquals("available", h.pipeline.snapshot["leanState"])
+            assertNull(h.pipeline.snapshot["leanBlockReason"])
+            assertEquals(emptyList<String>(), h.pipeline.snapshot["leanBlockedSourceIds"])
+            val states = h.rows().filter { it.optString("eventType") == "estimator_state" }
+            assertTrue(states.last().isNull("reason"))
+            h.pipeline.stopped(h.time, "recording_stopped")
+        }
+    }
     @Test fun `clock failure and buffer gap clear inputs and return on fresh epoch`() {
         Harness("clock-and-gap").use { h ->
             h.calibrate()
@@ -236,6 +273,7 @@ class LeanPipelineTest {
         val value = mapOf("leanMeasurementUs" to 1_000_000L, "leanAngleDeg" to -20.0, "leanState" to "available")
         assertEquals(-20.0, motionSnapshotAt(value, 1_500_000)["leanAngleDeg"])
         assertNull(motionSnapshotAt(value, 1_500_001)["leanAngleDeg"])
+        assertEquals("input_stale", motionSnapshotAt(value, 1_500_001)["leanBlockReason"])
         assertNull(motionSnapshotAt(value, 999_999)["leanAngleDeg"])
         assertEquals(-20.0, value["leanAngleDeg"])
     }

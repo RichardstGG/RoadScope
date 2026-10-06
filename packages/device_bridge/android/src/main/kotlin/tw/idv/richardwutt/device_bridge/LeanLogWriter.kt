@@ -25,6 +25,7 @@ internal class LeanLogWriter(private val file: File, private val id: String,
     var epoch = -1
         private set
     private var unavailable = false
+    private var unavailableReason: String? = null
     private var failed = false
     private var lastSync = 0L
     private var lastTime = 0L
@@ -130,10 +131,11 @@ internal class LeanLogWriter(private val file: File, private val id: String,
         epoch = proposed; window.clear()
     }
     fun state(available: Boolean, reason: String?, utc: Long, mono: Long) {
-        if (unavailable == !available) return
+        val nextReason = if (available) null else reason
+        if (unavailable == !available && unavailableReason == nextReason) return
         event("estimator_state", utc, mono, JSONObject().put("state", if (available) "available" else "unavailable")
-            .put("reason", reason ?: JSONObject.NULL))
-        unavailable = !available; window.clear()
+            .put("reason", nextReason ?: JSONObject.NULL))
+        unavailable = !available; unavailableReason = nextReason; window.clear()
     }
     fun calibrate(mount: LeanMount, restFrom: Long, restTo: Long, leftFrom: Long, leftTo: Long,
         leftMagnitude: Double, effective: Long, written: Long, spread: Double) {

@@ -8,6 +8,12 @@ import kotlin.math.*
 internal class LeanPipeline(private val log: LeanLogWriter, private val sources: List<MotionSource>, boot: String) {
     private data class Input(val sequence: Long, val time: Long, val values: DoubleArray)
     private val latest = mutableMapOf<String, Input>()
+    // Diagnostic evidence is bounded to one successfully stored input/source;
+    // never use it as fusion history or upgrade the platform accuracy status.
+    private data class Readiness(val measured: Boolean, val accuracy: String?)
+    private val inputReadiness = mutableMapOf<String, Readiness>()
+    private var blockReason: String? = "awaiting_inputs"
+    private var blockedSources: List<String> = sources.map { it.id }
     private val fusion = LeanFusion()
     private val rest = UprightWindow()
     private val automatic = AutoUprightReference(boot)
@@ -35,6 +41,8 @@ internal class LeanPipeline(private val log: LeanLogWriter, private val sources:
         private set
     val snapshot: Map<String, Any?> get() = mapOf("leanState" to if (available) "available" else "unavailable",
         "leanAngleDeg" to publishedAngle, "leanMeasurementUs" to publishedTime,
+        "leanBlockReason" to blockReason, "leanBlockedSourceIds" to blockedSources,
+        "sensorAccuracy" to inputReadiness.mapValues { it.value.accuracy },
         "leanFlags" to publishedFlags, "calibrationState" to command, "calibrationProgress" to progress,
         "calibrationId" to log.calibrationId, "filterEpoch" to log.epoch,
         "autoReferenceState" to when {
@@ -56,7 +64,7 @@ internal class LeanPipeline(private val log: LeanLogWriter, private val sources:
             command = "idle"; upright = null; pendingManual = null; pendingAutomatic = null
             automatic.reset(); rest.reset(); progress = 0.0; return
         }
-        check(available) { "Wait for all sensor clocks to be verified" }
+        check(available) { "Wait for verified clocks and trustworthy sensor inputs: $blockReason" }
         if (action == "left") check(command == "awaiting_left" && upright != null) { "First collect a stationary upright reference" }
         else upright = null
         automatic.reset(); pendingAutomatic = null; pendingManual = null
@@ -66,6 +74,9 @@ internal class LeanPipeline(private val log: LeanLogWriter, private val sources:
         log.state(false, if (reason == "raw_write_failure") "raw_write_failed"
             else if (reason == "input_clock_state_change") "input_clock_not_verified" else "input_interrupted", utc, mono)
         available = false; pendingReason = reason; latest.clear(); fusion.reset(); rest.reset()
+        blockReason = if (reason == "input_clock_state_change") "input_clock_not_verified"
+            else if (reason == "raw_write_failure") "raw_write_failed" else "input_interrupted"
+        blockedSources = emptyList()
         automatic.reset(); pendingAutomatic = null; pendingManual = null
         // Never finish a calibration with evidence from opposite sides of a break.
         upright = null; command = "idle"; progress = 0.0
@@ -77,13 +88,23 @@ internal class LeanPipeline(private val log: LeanLogWriter, private val sources:
     }
     fun consume(source: MotionSource, sequence: Long, measured: Long?, received: Long, utc: Long,
         values: DoubleArray, mapId: Int?, computed: Long, accuracy: String? = "high") {
-        if (accuracy == null || accuracy == "unreliable") {
-            interrupted("after_input_gap", utc, received); return
-        }
-        if (measured == null) {
-            if (available || latest.isNotEmpty()) interrupted("input_clock_state_change", utc, received)
+        inputReadiness[source.id] = Readiness(measured != null, accuracy)
+        // Aggregate all sources so healthy gyro/attitude callbacks cannot hide
+        // a persistent accelerometer blocker. Clock failures take precedence.
+        val blocked = listOf(
+            "sensor_unavailable" to sources.filter { !it.available }.map { it.id },
+            "awaiting_inputs" to sources.filter { !inputReadiness.containsKey(it.id) }.map { it.id },
+            "input_clock_not_verified" to sources.filter { inputReadiness[it.id]?.measured == false }.map { it.id },
+            "sensor_accuracy_unreliable" to sources.filter { inputReadiness[it.id]?.accuracy == "unreliable" }.map { it.id },
+            "sensor_accuracy_unavailable" to sources.filter { inputReadiness[it.id]?.accuracy == null }.map { it.id }
+        ).firstOrNull { it.second.isNotEmpty() }
+        if (blocked != null) {
+            interrupted(if (blocked.first in setOf("awaiting_inputs", "input_clock_not_verified"))
+                "input_clock_state_change" else "after_input_gap", utc, received)
+            blockReason = blocked.first; blockedSources = blocked.second
             return
         }
+        if (measured == null) return // Guard Kotlin nullable type; readiness rejects this above.
         val previous = latest[source.id]
         if (previous != null && (measured <= previous.time || measured - previous.time > 100_000 || sequence != previous.sequence + 1)) {
             interrupted("after_input_gap", utc, received)
@@ -104,7 +125,7 @@ internal class LeanPipeline(private val log: LeanLogWriter, private val sources:
             log.reset(pendingReason, latest.mapValues { it.value.sequence }, utc, received)
             fusion.reset(); fusion.seed(attitude.values)
             fusion.gyro(gyro.time, g)
-            available = true; epochStart = time
+            available = true; epochStart = time; blockReason = null; blockedSources = emptyList()
         } else if (source.kind == "gyroscope") fusion.gyro(measured, g)
         if (source.kind != "attitude") return
         val stationary = g.norm() <= 0.035 && abs(a.norm() - 9.80665) <= 0.4
@@ -162,6 +183,7 @@ internal class LeanPipeline(private val log: LeanLogWriter, private val sources:
         closedMaxima = log.maxima
         log.closeSegment(mono, reason); publishedAngle = null; publishedTime = null
         available = false; command = "idle"; upright = null; mount = null; progress = 0.0
+        blockReason = "recording_stopped"; blockedSources = emptyList()
         pendingManual = null; pendingAutomatic = null; activeAutomatic = null; automatic.reset(); rest.reset()
     }
     private fun vector(v: DoubleArray) = LeanVector(v[0], v[1], v[2])
