@@ -119,6 +119,34 @@ void main() {
     expect(_code(swift).contains('keyguardLocked = true'), isFalse);
   });
 
+  test('iOS relaunch requires an explicit foreground resume action', () {
+    final initializer = _body(
+      _code(plugin),
+      'override init()',
+      '  public func handle',
+    );
+    expect(
+      initializer,
+      contains('resuming = defaults.bool(forKey: "roadscope.active")'),
+    );
+    expect(initializer, isNot(contains('activateIfAuthorized()')));
+    expect(plugin, contains('startRequestedInThisProcess = true'));
+    expect(plugin, contains('!startRequestedInThisProcess'));
+    expect(plugin, contains('case "start":'));
+    expect(plugin, contains('activateIfAuthorized()'));
+  });
+
+  test('Android does not silently resume location after device boot', () {
+    final manifests = [
+      File('android/src/main/AndroidManifest.xml').readAsStringSync(),
+      File('../../apps/mobile/android/app/src/main/AndroidManifest.xml')
+          .readAsStringSync(),
+    ].join('\n');
+    expect(manifests, isNot(contains('BOOT_COMPLETED')));
+    expect(manifests, isNot(contains('LOCKED_BOOT_COMPLETED')));
+    expect(manifests, isNot(contains('BootReceiver')));
+  });
+
   test('Android names the two APIs its screen fields come from', () {
     final snapshot = File(
       'android/src/main/kotlin/tw/idv/richardwutt/device_bridge/TelemetrySnapshot.kt',

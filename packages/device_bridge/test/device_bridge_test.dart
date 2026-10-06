@@ -60,4 +60,14 @@ void main() {
     await bridge.openBatteryOptimizationSettings();
     expect(calls, ['openAppSettings', 'openBatteryOptimizationSettings']);
   });
+
+  test('interrupted and resuming states have explicit control semantics', () {
+    const interrupted = RecorderStatus(state: 'interrupted');
+    const resuming = RecorderStatus(state: 'resuming');
+
+    expect(interrupted.isRecording, isFalse);
+    expect(interrupted.canResume, isTrue);
+    expect(resuming.isRecording, isTrue);
+    expect(resuming.canResume, isFalse);
+  });
 }

@@ -41,6 +41,17 @@ class LocationRecorderService : Service(), LocationListener {
 
         private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
+        internal fun resolvedRecorderState(
+            persistedState: String,
+            servicePresent: Boolean,
+            serviceActive: Boolean,
+        ): String = when {
+            persistedState != "recording" -> persistedState
+            serviceActive -> "recording"
+            servicePresent -> "resuming"
+            else -> "interrupted"
+        }
+
         fun logFile(context: Context): File? {
             val id = prefs(context).getString("latestId", null) ?: return null
             return File(File(context.filesDir, "recordings"), "$id.ndjson")
@@ -57,6 +68,12 @@ class LocationRecorderService : Service(), LocationListener {
 
         fun status(context: Context): Map<String, Any?> {
             val p = prefs(context)
+            val service = instance
+            val state = resolvedRecorderState(
+                persistedState = p.getString("state", "idle") ?: "idle",
+                servicePresent = service != null && !service.destroyed,
+                serviceActive = service?.active == true,
+            )
             return mapOf(
                 "platform" to "android",
                 "manufacturer" to BackgroundExecutionSupport.manufacturer(),
@@ -66,12 +83,15 @@ class LocationRecorderService : Service(), LocationListener {
                     BackgroundExecutionSupport.batteryOptimizationIgnored(context),
                 "vendorBackgroundSetupRecommended" to
                     BackgroundExecutionSupport.recommendsVendorGuidance(),
-                "state" to (p.getString("state", "idle") ?: "idle"),
+                // A persisted recording intent is not proof that a native
+                // recorder is alive. Keep interrupted/resuming distinct so
+                // Flutter never tells the user that a dead segment is active.
+                "state" to state,
                 "recordingId" to p.getString("latestId", null),
                 "logPath" to logFile(context)?.absolutePath,
                 "telemetryPath" to telemetryFile(context)?.absolutePath,
                 "error" to p.getString("error", null),
-                "sampleAgeMs" to (instance?.lastMeasurementMonoUs ?: -1).let { mono ->
+                "sampleAgeMs" to (service?.lastMeasurementMonoUs ?: -1).let { mono ->
                     val age = (SystemClock.elapsedRealtimeNanos() / 1000 - mono) / 1000
                     if (mono >= 0 && age >= 0 && p.getString("state", null) == "recording") age else null
                 },

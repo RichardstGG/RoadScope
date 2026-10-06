@@ -87,5 +87,7 @@ class RecorderStatus {
   final bool? batteryOptimizationIgnored;
   final bool vendorBackgroundSetupRecommended;
 
-  bool get isRecording => state == 'recording';
+  bool get isRecording => state == 'recording' || state == 'resuming';
+
+  bool get canResume => state == 'interrupted';
 }

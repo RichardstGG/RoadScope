@@ -10,6 +10,8 @@ Flutter 3.47.3 診斷 App，版本 `0.0.2+2`，識別碼 `tw.idv.richardwutt.roa
 
 若上一段記錄沒有自己收尾（程序被終止、崩潰、斷電），下次停止記錄時會補寫一列 `recording_interrupted`，畫面也會紅字標明「上一段記錄沒有自己收尾」並指出定位紀錄寫到哪一個序號。該列的時間是**發現**中斷的時間，不是中斷發生的時間，裝置狀態欄位刻意留成不可得。反之，**沒有這個標記不代表正常結束**——若從此沒再打開 App 就沒人補寫，所以判讀時仍要比對最後一筆的時間與你預期的結束時間。
 
+持久化的「上一段仍想記錄」不等於原生採集仍活著。原生服務／plugin 不在執行時，畫面會顯示「記錄已中斷」，並提供兩個互斥動作：「繼續同一次記錄」沿用 `recordingId` 並接續序號；「結束這次記錄」關閉續錄意圖後才開放匯出。重新開啟 App 或裝置重開機本身不會偷偷開始定位。Android 同一次開機內由系統執行的 `START_STICKY` 服務重建仍可自動續接；跨 boot 則必須等使用者開啟 App 後手動續錄，並以 `recording_resumed.reason: boot` 留下時間域改變證據。專案刻意不註冊 `BOOT_COMPLETED` receiver。
+
 telemetry 寫在獨立檔案（Android `<filesDir>/diagnostics/<recordingId>.telemetry.ndjson`、iOS `Documents/diagnostics/<recordingId>.telemetry.ndjson`），有自己的 `telemetryVersion` 與序號空間，不含位置資料，也沒有動到 `location-log` v1 的任何欄位、`recordType`、`eventType` 或序號規則。欄位表、平台限制、判讀方式與真機驗證現況見 [`docs/diagnostics-telemetry.md`](../../docs/diagnostics-telemetry.md)。要把 telemetry 欄位放進正式定位紀錄，仍須先與契約擁有者協調。
 
 匯出分成兩個按鈕，都需先停止記錄：「匯出 location-log v1」（含精確座標）與「匯出 diagnostics telemetry」（只含裝置與 App 狀態）。兩者分享文字各自標明格式，不混在同一個檔案或同一次分享裡。
@@ -41,7 +43,7 @@ npm ci --prefix contracts/tools
 node contracts/tools/validate-location-log.mjs /absolute/path/to/exported.ndjson
 ```
 
-每次測試前記下 App commit、手機型號／OS、權限設定、電量與開始 UTC。選一段可安全停留的戶外路線；駕駛者不要操作畫面。兩端都要各自跑下列測試，不能以模擬器代替。
+每次測試前記下 App commit、手機型號／OS、權限設定、電量與開始 UTC。選一段可安全停留的戶外路線；駕駛者不要操作畫面。Android V1.0 基礎功能與 UI 真機通過前，只執行 Android 真機測試。iOS 先維持 CI 編譯、靜態檢查與理論相容；屆時再以同一套案例安排 iPhone 真機，不能把 CI 或模擬器視為 iOS 實機證據。
 
 | 測試 | 操作 | 應記錄的證據 |
 | --- | --- | --- |
