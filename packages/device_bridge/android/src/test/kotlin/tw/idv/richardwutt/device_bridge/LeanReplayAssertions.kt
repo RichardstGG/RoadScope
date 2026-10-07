@@ -19,6 +19,9 @@ internal object LeanReplayAssertions {
             .associateBy { it.getString("calibrationId") }
         var checked = 0
         for (estimate in rows.filter { it.getString("recordType") == "lean_estimate" && !it.isNull("leanAngleDeg") }) {
+            val unverifiedCalibration = estimate.getJSONArray("qualityFlags").let { flags ->
+                (0 until flags.length()).any { flags.getString(it) == "calibration_input_unverified" }
+            }
             val epoch = epochs.getValue(estimate.getInt("filterEpoch"))
             val boot = estimate.getString("deviceBootId")
             val starts = epoch.getJSONArray("initialInputs").let { array ->
@@ -48,8 +51,13 @@ internal object LeanReplayAssertions {
                 if (!seeded) {
                     fusion.seed(q); fusion.gyro(gyro.getLong("measurementMonotonicUs"), rate); seeded = true
                 } else if (kind == "gyroscope") fusion.gyro(input.getLong("measurementMonotonicUs"), rate)
-                if (kind == "attitude" && rate.norm() <= 0.035 &&
-                    abs(vector(accel, "xMps2", "yMps2", "zMps2").norm() - 9.80665) <= 0.4) fusion.stationaryCorrection(q)
+                if (kind == "attitude") {
+                    if (accel.getString("accuracyLevel") == "unreliable" || unverifiedCalibration)
+                        fusion.seed(q)
+                    else if (rate.norm() <= 0.035 &&
+                        abs(vector(accel, "xMps2", "yMps2", "zMps2").norm() - 9.80665) <= 0.4)
+                        fusion.stationaryCorrection(q)
+                }
             }
             val calibration = calibrations.getValue(estimate.getString("calibrationId"))
             fun arrayVector(key: String): LeanVector {

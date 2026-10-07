@@ -23,7 +23,9 @@ stride=1，未降頻；每 0.5 秒與正常停止時 fsync。UTC offset 差 >2 m
 新增 clock_map。保留最多 4 筆映射，晚到來源只用測量時刻已生效的映射，
 無可用映射時 clockMapId=null＋clock_map_unavailable，不套未來映射。
 每秒檢查空間，少於 256 MiB 停止 motion 並回報錯誤，
-GPS 不因此停止。實際儲存量只在本機量測與保存，後續需控制落盤頻率。
+GPS 不因此停止。實際儲存量只在本機量測與保存。真機曾回報高於請求頻率的
+加速度與陀螺儀回呼，落盤量超出原估；尚未改變 stride=1／可重播政策，
+安排長測前須決定儲存策略。
 缺口、非法輸入、buffer overflow 有事件；raw IO 失敗停止，不盲目重試。
 定位 boot authority 改變時停止 motion，要求重新開始，不默默串接時域。
 
@@ -55,7 +57,7 @@ lean writer 分段最大值以連續至少 100 ms 同側窗口的最小絕對角
 保存來源時間；重校準保存前段，無效值、跨 boot、逆序或 >100 ms 缺口
 清除窗口。規則尚需動態參考比較，不代表真實最大傾角準確度。
 
-本版演算法標識為 gyro-rest-up-auto-experimental-v3（前版為 v2）：
+本版演算法標識為 gyro-rest-up-auto-experimental-v4（前版為 v3）：
 融合仍為平台 quaternion 初始化 world-up，
 gyro Rodrigues 積分；只有 rest-like 輸入才以每筆 1% 慢速修正至平台姿態。
 rest-like 是 gyro ≤0.035 rad/s、比力量值距 g ≤0.4 m/s² 的工程判斷，
@@ -65,6 +67,9 @@ rest-like 是 gyro ≤0.035 rad/s、比力量值距 g ≤0.4 m/s² 的工程判�
 加速度來源持續回報 unreliable 時，只在實驗模式允許手動校準與角度顯示；
 估算與校準保留 `sensor_accuracy_unreliable` 品質標記，受影響校準後續估算另保留
 `calibration_input_unverified`，全部不計正式最大值，自動直立參考停用。
+實車短測發現馬達／道路震動可能讓 rest-like 閘門長時間不成立，使純 gyro 積分
+大幅偏離平台姿態。v4 僅在上述受限實驗模式（包含未驗證校準延續），每筆已存 attitude 重新錨定
+world-up；角度仍受平台姿態與加速度品質限制，不取得精度保證，需新版實車複測。
 gyro／attitude unreliable、任一來源 accuracy 不可得、時鐘未驗證仍停估算。
 品質模式切換會清除融合歷史並開新 epoch；實驗校準即使其後加速度品質恢復，
 仍須重新校準才可取得合格最大值。兩個新旗標須由契約擁有者列為已知阻擋旗標；
@@ -131,10 +136,11 @@ UI 顯示有效時間與方向未知原因，請停車完成手動校準，不�
   服務銷毀在 GPS owner 排入 motion 清理，另檢查啟動途中 destroyed，避免主執行緒
   清理與 session 建立競態；真實 Android 銷毀／重建流程仍待 hardware 驗證。
 - manual / hardware：Android 桌面短測已完成受限模式的直立／左傾校準、左負右正及回平放近零，
-  UI 能正常停止；原始與配對檔在本機驗證通過，且未產生正式最大值。
-  這不是車身傾角準確度證據。個別行程統計與原始檔只留本機，不進 Git 或 PR。
-  車架固定、背景、低儲存量與耗電仍待測。
-- untested：實際動態融合準確度／漂移、車架固定校準操作、EventChannel 背景生命週期、
+  UI 能正常停止。前版實車短測原始與配對檔在本機驗證通過，但暴露融合漂移；
+  v4 防漂移修正尚未真機複測。兩輪都不是車身傾角準確度證據。
+  個別行程統計與原始檔只留本機，不進 Git 或 PR。
+  長時間背景、低儲存量與耗電仍待測。
+- untested：v4 實際動態融合準確度／漂移、車架固定新版操作、EventChannel 背景生命週期、
   真正程序死亡／斷電的双檔耐久性、Android OEM accuracy、iOS runtime。
   自動參考已做原生管線合成整合／UI mock，真實 GPS 至服務交接仍未實測；
   完整融合重播比對僅涵蓋合成案例，不涵蓋真機或重選自動校準。

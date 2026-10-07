@@ -31,13 +31,15 @@ class LeanPipelineTest {
         private var roll = 0.0
         init { raw.start(utc, time); log.start(utc, time) }
         fun frame(angle: Double = roll, verified: Boolean = true, force: Double = 9.80665,
-            accuracies: List<String?> = listOf("high", "high", "high")) {
+            accuracies: List<String?> = listOf("high", "high", "high"),
+            gyroOverride: DoubleArray? = null) {
             time += 20_000
             val radians = Math.toRadians(angle)
             val rate = Math.toRadians(angle - roll) / 0.02
             roll = angle
             val values = listOf(doubleArrayOf(0.0, sin(radians) * force, cos(radians) * force),
-                doubleArrayOf(rate, 0.0, 0.0), doubleArrayOf(cos(radians / 2), sin(radians / 2), 0.0, 0.0))
+                gyroOverride ?: doubleArrayOf(rate, 0.0, 0.0),
+                doubleArrayOf(cos(radians / 2), sin(radians / 2), 0.0, 0.0))
             sources.forEachIndexed { index, source ->
                 val previous = raw.clockStates[source.id]
                 raw.clock(source.id, verified, utc + time / 1000, time + 1000)
@@ -199,6 +201,22 @@ class LeanPipelineTest {
             assertTrue(estimates.isNotEmpty())
             assertTrue(estimates.all { !it.getBoolean("extremumEligible") })
             assertFalse(h.rows().any { it.optString("recordType") == "lean_extremum" })
+            h.pipeline.stopped(h.time, "recording_stopped")
+            assertTrue(LeanReplayAssertions.verify(h.motionFile, h.leanFile) > 0)
+        }
+    }
+    @Test fun `experimental platform anchor prevents vibration driven gyro drift`() {
+        Harness("experimental-vibration-anchor").use { h ->
+            val weak = listOf("unreliable", "high", "high")
+            h.calibrate(weak)
+            repeat(300) { h.frame(0.0, accuracies = weak,
+                gyroOverride = doubleArrayOf(0.15, 0.0, 0.0)) }
+            assertEquals(0.0, h.pipeline.snapshot["leanAngleDeg"] as Double, 0.5)
+            assertEquals("experimental_unverified_accelerometer", h.pipeline.snapshot["leanQualityMode"])
+            repeat(100) { h.frame(0.0, gyroOverride = doubleArrayOf(0.15, 0.0, 0.0)) }
+            assertEquals(0.0, h.pipeline.snapshot["leanAngleDeg"] as Double, 0.5)
+            assertEquals("experimental_unverified_calibration", h.pipeline.snapshot["leanQualityMode"])
+            assertTrue(h.log.maxima.values.all { it == null })
             h.pipeline.stopped(h.time, "recording_stopped")
             assertTrue(LeanReplayAssertions.verify(h.motionFile, h.leanFile) > 0)
         }

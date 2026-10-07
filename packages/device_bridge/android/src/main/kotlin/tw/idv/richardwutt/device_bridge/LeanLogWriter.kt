@@ -18,7 +18,7 @@ internal class LeanLogWriter(private val file: File, private val id: String,
     private val inputs: List<String>, private val rawCounts: () -> Map<String, Long>,
     private val rawSync: (Long) -> Unit, private val synthetic: Boolean = false,
     private val appendOverride: ((ByteArray) -> Unit)? = null) : AutoCloseable {
-    companion object { const val ALGORITHM = "gyro-rest-up-auto-experimental-v3" }
+    companion object { const val ALGORITHM = "gyro-rest-up-auto-experimental-v4" }
     private var stream: RandomAccessFile? = null
     private var next = 0L
     val count: Long get() = next

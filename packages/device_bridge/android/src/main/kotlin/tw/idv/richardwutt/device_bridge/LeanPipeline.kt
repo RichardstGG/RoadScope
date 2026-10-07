@@ -148,7 +148,14 @@ internal class LeanPipeline(private val log: LeanLogWriter, private val sources:
         } else if (source.kind == "gyroscope") fusion.gyro(measured, g)
         if (source.kind != "attitude") return
         val stationary = g.norm() <= 0.035 && abs(a.norm() - 9.80665) <= 0.4
-        if (stationary) fusion.stationaryCorrection(attitude.values)
+        // On devices whose accelerometer status remains unreliable, engine
+        // vibration can prevent the rest gate from ever opening. Unbounded
+        // gyro propagation then drifts far from the platform attitude even
+        // while the vehicle is upright. This experimental path is explicitly
+        // quality-flagged and never eligible for formal maxima; anchor every
+        // persisted attitude sample instead of presenting accumulated drift.
+        if (experimental || calibrationUnverified) fusion.seed(attitude.values)
+        else if (stationary) fusion.stationaryCorrection(attitude.values)
         val up = fusion.up ?: return
         // Defer activation to a later REAL measurement, never manufacture a
         // future write time to put calibration after the current evidence.
