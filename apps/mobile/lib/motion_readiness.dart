@@ -93,6 +93,10 @@ class _MotionReadinessState extends State<MotionReadiness> {
   String _angle(Object? value) =>
       value is num ? '${value.toStringAsFixed(1)}°' : '—';
 
+  bool get _experimental =>
+      _status['leanQualityMode'] == 'experimental_unverified_accelerometer' ||
+      _status['leanQualityMode'] == 'experimental_unverified_calibration';
+
   String get _blockReason => switch (_status['leanBlockReason']) {
     'awaiting_inputs' => '等待各來源第一筆資料',
     'input_clock_not_verified' => '感測測量時鐘尚未驗證',
@@ -120,6 +124,8 @@ class _MotionReadinessState extends State<MotionReadiness> {
       ? '未在採集，開始記錄後才收集候選'
       : _status['leanState'] == 'unavailable'
       ? '感測輸入未就緒，自動收集暫停'
+      : _experimental
+      ? '加速度品質未驗證，自動參考停用；僅允許停車手動校準'
       : switch (_status['autoReferenceState']) {
           'manual_priority' => '手動校準優先，自動參考不覆蓋',
           'manual_in_progress' => '手動校準進行中，自動收集暫停',
@@ -142,9 +148,13 @@ class _MotionReadinessState extends State<MotionReadiness> {
       const Divider(height: 32),
       Text('傾角開發診斷', style: Theme.of(context).textTheme.titleMedium),
       Text(
-        '傾角 ${_angle(_status['leanAngleDeg'])} · 最大左傾 ${_angle(_status['maxLeft'])} · 最大右傾 ${_angle(_status['maxRight'])}',
+        '傾角 ${_angle(_status['leanAngleDeg'])} · 最大左傾 ${_angle(_experimental ? null : _status['maxLeft'])} · 最大右傾 ${_angle(_experimental ? null : _status['maxRight'])}',
       ),
       const Text('實驗性估算：負值左傾、正值右傾，尚未驗證道路準確度。品質不合格不計最大值。'),
+      if (_experimental)
+        const Text(
+          '受限實驗模式：加速度目前或校準時回報不可靠。傾角只供停車操作檢查，精度未驗證；本模式不產生正式左右最大值或自動直立參考。',
+        ),
       Text('校準：$_calibrationState · 品質：${_status['leanFlags'] ?? '—'}'),
       Text('傾角輸入：$_blockReason'),
       if (_status['leanBlockedSourceIds'] case final List ids)

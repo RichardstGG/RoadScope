@@ -48,14 +48,14 @@ class LeanPipelineTest {
                     utc + time / 1000, values[index], raw.currentMapId, time + 2000, accuracies[index])
             }
         }
-        fun calibrate() {
-            repeat(60) { frame(0.0) }
+        fun calibrate(accuracies: List<String?> = listOf("high", "high", "high")) {
+            repeat(60) { frame(0.0, accuracies = accuracies) }
             pipeline.control("upright")
-            repeat(152) { frame(0.0) }
+            repeat(152) { frame(0.0, accuracies = accuracies) }
             assertEquals("awaiting_left", pipeline.snapshot["calibrationState"])
-            frame(15.0)
+            frame(15.0, accuracies = accuracies)
             pipeline.control("left")
-            repeat(160) { frame(15.0) }
+            repeat(160) { frame(15.0, accuracies = accuracies) }
             assertNotNull(log.calibrationId)
         }
         fun rows() = leanFile.readLines().map(::JSONObject)
@@ -158,19 +158,76 @@ class LeanPipelineTest {
             assertThrows(IllegalStateException::class.java) { h.pipeline.control("upright") }
         }
     }
-    @Test fun `persistent unreliable acceleration replaces clock reason without flooding events`() {
-        Harness("persistent-accuracy-blocker").use { h ->
+    @Test fun `persistent unreliable acceleration remains explicitly experimental without extrema`() {
+        Harness("persistent-accuracy-experimental").use { h ->
             repeat(32) { h.frame(verified = false, accuracies = listOf("unreliable", "high", "high")) }
             repeat(500) { h.frame(accuracies = listOf("unreliable", "high", "high")) }
             val status = h.pipeline.snapshot
-            assertEquals("sensor_accuracy_unreliable", status["leanBlockReason"])
-            assertEquals(listOf(sources[0].id), status["leanBlockedSourceIds"])
+            assertNull(status["leanBlockReason"])
+            assertEquals(emptyList<String>(), status["leanBlockedSourceIds"])
             assertEquals("unreliable", (status["sensorAccuracy"] as Map<*, *>)[sources[0].id])
-            assertEquals("unavailable", status["leanState"])
-            assertThrows(IllegalStateException::class.java) { h.pipeline.control("upright") }
-            assertFalse(h.rows().any { it.optString("recordType") == "lean_estimate" })
+            assertEquals("available", status["leanState"])
+            assertEquals("experimental_unverified_accelerometer", status["leanQualityMode"])
+            assertTrue(h.rows().filter { it.optString("recordType") == "lean_estimate" }.all {
+                !it.getBoolean("extremumEligible") &&
+                    it.getJSONArray("qualityFlags").toString().contains("sensor_accuracy_unreliable")
+            })
+            assertTrue(h.rows().any { it.optString("recordType") == "lean_estimate" })
+            h.pipeline.control("upright")
             val states = h.rows().filter { it.optString("eventType") == "estimator_state" }
-            assertEquals(listOf("input_clock_not_verified", "input_interrupted"), states.map { it.getString("reason") })
+            assertEquals(2, states.size)
+            h.pipeline.stopped(h.time, "recording_stopped")
+        }
+    }
+    @Test fun `manual experimental calibration yields angles but never maxima or automatic reference`() {
+        Harness("experimental-manual-only").use { h ->
+            val weak = listOf("unreliable", "high", "high")
+            h.calibrate(weak)
+            repeat(30) { h.frame(15.0, accuracies = weak) }
+            assertEquals(-15.0, h.pipeline.snapshot["leanAngleDeg"] as Double, 0.05)
+            assertEquals("experimental_unverified_accelerometer", h.pipeline.snapshot["leanQualityMode"])
+            assertTrue(h.log.maxima.values.all { it == null })
+            h.ride(35)
+            assertEquals("experimental_unverified_calibration", h.pipeline.snapshot["leanQualityMode"])
+            assertNull(h.pipeline.snapshot["maxLeft"])
+            assertNull(h.pipeline.snapshot["maxRight"])
+            val calibration = h.rows().single { it.optString("recordType") == "lean_calibration" }
+            assertEquals("manual_upright", calibration.getString("origin"))
+            assertTrue(calibration.getJSONArray("qualityFlags").toString().contains("sensor_accuracy_unreliable"))
+            val estimates = h.rows().filter { it.optString("recordType") == "lean_estimate" &&
+                !it.isNull("leanAngleDeg") }
+            assertTrue(estimates.isNotEmpty())
+            assertTrue(estimates.all { !it.getBoolean("extremumEligible") })
+            assertFalse(h.rows().any { it.optString("recordType") == "lean_extremum" })
+            h.pipeline.stopped(h.time, "recording_stopped")
+            assertTrue(LeanReplayAssertions.verify(h.motionFile, h.leanFile) > 0)
+        }
+    }
+    @Test fun `other unreliable sources still block experimental path`() {
+        Harness("gyro-accuracy-blocker").use { h ->
+            repeat(60) { h.frame(accuracies = listOf("unreliable", "unreliable", "high")) }
+            assertEquals("unavailable", h.pipeline.snapshot["leanState"])
+            assertEquals("sensor_accuracy_unreliable", h.pipeline.snapshot["leanBlockReason"])
+            assertEquals(listOf(sources[1].id), h.pipeline.snapshot["leanBlockedSourceIds"])
+            assertFalse(h.rows().any { it.optString("recordType") == "lean_estimate" })
+        }
+    }
+    @Test fun `quality mode changes reset epoch and hide prior extrema while experimental`() {
+        Harness("experimental-transition").use { h ->
+            h.calibrate()
+            val trustedMax = h.log.maxima["maxLeft"]
+            assertNotNull(trustedMax)
+            val oldEpoch = h.log.epoch
+            repeat(60) { h.frame(20.0, accuracies = listOf("unreliable", "high", "high")) }
+            assertTrue(h.log.epoch > oldEpoch)
+            assertEquals("experimental_unverified_accelerometer", h.pipeline.snapshot["leanQualityMode"])
+            assertNull(h.pipeline.snapshot["maxLeft"])
+            assertEquals(trustedMax, h.log.maxima["maxLeft"])
+            val weakEpoch = h.log.epoch
+            repeat(60) { h.frame(0.0) }
+            assertTrue(h.log.epoch > weakEpoch)
+            assertEquals("standard", h.pipeline.snapshot["leanQualityMode"])
+            assertEquals(trustedMax, h.pipeline.snapshot["maxLeft"])
             h.pipeline.stopped(h.time, "recording_stopped")
         }
     }
@@ -310,12 +367,12 @@ class LeanPipelineTest {
             h.pipeline.stopped(h.time + 1, "recording_stopped")
         }
     }
-    @Test fun `unreliable motion never reaches the estimator or completes calibration`() {
+    @Test fun `unreliable gyroscope never reaches estimator or completes calibration`() {
         Harness("accuracy-gate").use { h ->
             repeat(60) { h.frame() }
             h.pipeline.control("upright")
-            h.pipeline.consume(sources[0], 60, h.time + 20_000, h.time + 21_000, utc,
-                doubleArrayOf(0.0, 0.0, 9.8), h.raw.currentMapId, h.time + 22_000, "unreliable")
+            h.pipeline.consume(sources[1], 60, h.time + 20_000, h.time + 21_000, utc,
+                doubleArrayOf(0.0, 0.0, 0.0), h.raw.currentMapId, h.time + 22_000, "unreliable")
             assertEquals("unavailable", h.pipeline.snapshot["leanState"])
             assertEquals("idle", h.pipeline.snapshot["calibrationState"])
             assertNull(h.pipeline.snapshot["leanAngleDeg"])

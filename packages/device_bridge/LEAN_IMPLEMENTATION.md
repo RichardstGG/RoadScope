@@ -23,18 +23,20 @@ stride=1，未降頻；每 0.5 秒與正常停止時 fsync。UTC offset 差 >2 m
 新增 clock_map。保留最多 4 筆映射，晚到來源只用測量時刻已生效的映射，
 無可用映射時 clockMapId=null＋clock_map_unavailable，不套未來映射。
 每秒檢查空間，少於 256 MiB 停止 motion 並回報錯誤，
-GPS 不因此停止。約 180 MB/h 只是契約 fixture 粗估，待真機量測。
+GPS 不因此停止。實際儲存量只在本機量測與保存，後續需控制落盤頻率。
 缺口、非法輸入、buffer overflow 有事件；raw IO 失敗停止，不盲目重試。
 定位 boot authority 改變時停止 motion，要求重新開始，不默默串接時域。
 
 UI 顯示能力、樣本數、時鐘狀態、錯誤與車把轉向誤差提示。
 motionStatus／EventChannel 新增可選診斷欄位 `leanBlockReason`、
-`leanBlockedSourceIds`、`sensorAccuracy`（每來源最近成功寫入樣本的原始品質，非即時保證）。
+`leanBlockedSourceIds`、`sensorAccuracy`（每來源最近成功寫入樣本的原始品質，非即時保證）、
+`leanQualityMode`（標準或加速度品質未驗證的受限實驗模式）。
 以所有來源彙整時鐘與 accuracy 阻擋，健康來源不會掩蓋另一來源不可靠。
 舊 plugin 未提供時顯示尚未取得診斷，iOS 不因缺欄位失敗。
 同為 unavailable 但原因改變時追加既有契約 estimator_state；相同原因不重複寫入。
-accuracy 阻擋以契約已有的 input_interrupted 記錄，具體來源與品質看原始 motion／UI，
-不新增契約欄位或原因列舉，也不改寫舊紀錄。品質恢复需完整新輸入與新 epoch。
+陀螺儀／姿態的 accuracy 阻擋以契約已有的 input_interrupted 記錄，具體來源與品質看原始 motion／UI；
+品質恢復需完整新輸入與新 epoch。加速度持續 unreliable 時採使用者同意的受限實驗路徑，
+保留原始 accuracyLevel，不改寫舊紀錄。
 狀態取自記憶體小快照，不讀完整高頻檔案。正常停止後可主動分開分享 motion／lean。
 EventChannel 最多 10 Hz 發布已寫出的估算，main looper 只留一個待送快照。
 超過 500 ms 的舊角度隱藏；IO watchdog 每 250 ms 檢查靜默中斷並記 unavailable。
@@ -53,15 +55,20 @@ lean writer 分段最大值以連續至少 100 ms 同側窗口的最小絕對角
 保存來源時間；重校準保存前段，無效值、跨 boot、逆序或 >100 ms 缺口
 清除窗口。規則尚需動態參考比較，不代表真實最大傾角準確度。
 
-本版演算法標識為 gyro-rest-up-auto-experimental-v2（前版為 gyro-rest-up-experimental-v1）：
+本版演算法標識為 gyro-rest-up-auto-experimental-v3（前版為 v2）：
 融合仍為平台 quaternion 初始化 world-up，
 gyro Rodrigues 積分；只有 rest-like 輸入才以每筆 1% 慢速修正至平台姿態。
 rest-like 是 gyro ≤0.035 rad/s、比力量值距 g ≤0.4 m/s² 的工程判斷，
 不證明車輛停住；長緩彎可能誤判、gyro 會漂移、平台姿態可能被動態污染。
 尚不具有道路準確度保證。比力量值距 g >2 m/s² 時帶 dynamic_acceleration_high，
 缺口後 1 秒帶 after_input_gap，兩者都不計最大值。
-來源 accuracy 為 unreliable 或不可得時停估算；平台若不報有效 accuracy，
-本版可能保持 unavailable，須真機確認，不為讓畫面出值而放寬。
+加速度來源持續回報 unreliable 時，只在實驗模式允許手動校準與角度顯示；
+估算與校準保留 `sensor_accuracy_unreliable` 品質標記，受影響校準後續估算另保留
+`calibration_input_unverified`，全部不計正式最大值，自動直立參考停用。
+gyro／attitude unreliable、任一來源 accuracy 不可得、時鐘未驗證仍停估算。
+品質模式切換會清除融合歷史並開新 epoch；實驗校準即使其後加速度品質恢復，
+仍須重新校準才可取得合格最大值。兩個新旗標須由契約擁有者列為已知阻擋旗標；
+在契約更新前驗證器會提示 unknown flag，不能宣稱零警告。
 
 只有成功寫出 raw 的輸入才能進融合；最多 20 Hz 写估算，measurement 時刻為
 最新引用輸入的測量時間，不是 UI／接收時間。null 時鐘完全不寫估算。
@@ -118,18 +125,16 @@ UI 顯示有效時間與方向未知原因，請停車完成手動校準，不�
   缺樣、有界 buffer、合成幾何、手動校準、估算與峰值來源、品質閘門、
   重校準、lean 尾行修復、跨 boot、dangling raw 拒絕及 fsync barrier 呼叫。
   原生 motion／lean 合成輸出交 PR #10 同版驗證器逐檔及配對檢查，CI 固定契約 SHA。
-  原生共 69 項，其中自動候選核心 11 項；涵蓋不同 callback 密度、品質缺失、
+  涵蓋不同 callback 密度、品質缺失、
   GPS freshness／逆序、方向群優勢、spread 上界及候選容量超限。
 - static：Dart UI 分析、原生採集生命週期整合及 Android 建置。
   服務銷毀在 GPS owner 排入 motion 清理，另檢查啟動途中 destroyed，避免主執行緒
   清理與 session 建立競態；真實 Android 銷毀／重建流程仍待 hardware 驗證。
-- manual / hardware：前版 ba460d0 在 Xiaomi 21081111RG／Android 14 正常開始與停止。
-  約 562.66 秒、87,721 筆 motion，每來源約 51.91 Hz，無序號缺口或 >100 ms 間隔，
-  三來源時鐘均驗證通過；加速度全程 unreliable、gyro／attitude high，零 lean 估算。
-  三檔契約與配對零錯誤／警告。這是品質阻擋案例，不是校準或傾角精度驗收。
-  USB 全程連接，非電池／背景耐久測試。修正後版本尚需實測；background、
-  低儲存量、耗電待測。之前 GPS 長測不是本版證據。
-- untested：實際動態融合準確度／漂移、停車校準操作、EventChannel 背景生命週期、
+- manual / hardware：Android 桌面短測已完成受限模式的直立／左傾校準、左負右正及回平放近零，
+  UI 能正常停止；原始與配對檔在本機驗證通過，且未產生正式最大值。
+  這不是車身傾角準確度證據。個別行程統計與原始檔只留本機，不進 Git 或 PR。
+  車架固定、背景、低儲存量與耗電仍待測。
+- untested：實際動態融合準確度／漂移、車架固定校準操作、EventChannel 背景生命週期、
   真正程序死亡／斷電的双檔耐久性、Android OEM accuracy、iOS runtime。
   自動參考已做原生管線合成整合／UI mock，真實 GPS 至服務交接仍未實測；
   完整融合重播比對僅涵蓋合成案例，不涵蓋真機或重選自動校準。

@@ -55,7 +55,7 @@ void main() {
   });
 
   testWidgets(
-    'verified clocks do not hide unreliable sensor calibration blocker',
+    'experimental acceleration is explicit and hides formal maxima',
     (tester) async {
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(
@@ -63,9 +63,10 @@ void main() {
             (call) async => call.method == 'motionStatus'
                 ? <String, Object?>{
                     'state': 'recording',
-                    'leanState': 'unavailable',
-                    'leanBlockReason': 'sensor_accuracy_unreliable',
-                    'leanBlockedSourceIds': ['android-accelerometer'],
+                    'leanState': 'available',
+                    'leanQualityMode': 'experimental_unverified_accelerometer',
+                    'leanAngleDeg': -12.5,
+                    'maxLeft': 11.0,
                     'sensorAccuracy': {
                       'android-accelerometer': 'unreliable',
                       'android-gyroscope': 'high',
@@ -82,16 +83,14 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.textContaining('感測器回報不可靠'), findsOneWidget);
-      expect(find.text('阻擋來源：android-accelerometer'), findsOneWidget);
-      expect(find.textContaining('不能修復感測器品質'), findsOneWidget);
-      expect(find.textContaining('感測輸入未就緒，自動收集暫停'), findsOneWidget);
-      expect(find.textContaining('傾角 — · 最大左傾 — · 最大右傾 —'), findsOneWidget);
+      expect(find.textContaining('受限實驗模式'), findsOneWidget);
+      expect(find.textContaining('自動參考停用'), findsOneWidget);
+      expect(find.textContaining('傾角 -12.5° · 最大左傾 — · 最大右傾 —'), findsOneWidget);
       expect(
         tester
             .widget<OutlinedButton>(find.widgetWithText(OutlinedButton, '直立校準'))
             .onPressed,
-        isNull,
+        isNotNull,
       );
       expect(
         tester

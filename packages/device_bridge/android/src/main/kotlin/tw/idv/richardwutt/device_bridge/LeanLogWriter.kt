@@ -18,7 +18,7 @@ internal class LeanLogWriter(private val file: File, private val id: String,
     private val inputs: List<String>, private val rawCounts: () -> Map<String, Long>,
     private val rawSync: (Long) -> Unit, private val synthetic: Boolean = false,
     private val appendOverride: ((ByteArray) -> Unit)? = null) : AutoCloseable {
-    companion object { const val ALGORITHM = "gyro-rest-up-auto-experimental-v2" }
+    companion object { const val ALGORITHM = "gyro-rest-up-auto-experimental-v3" }
     private var stream: RandomAccessFile? = null
     private var next = 0L
     val count: Long get() = next
@@ -138,7 +138,8 @@ internal class LeanLogWriter(private val file: File, private val id: String,
         unavailable = !available; unavailableReason = nextReason; window.clear()
     }
     fun calibrate(mount: LeanMount, restFrom: Long, restTo: Long, leftFrom: Long, leftTo: Long,
-        leftMagnitude: Double, effective: Long, written: Long, spread: Double) {
+        leftMagnitude: Double, effective: Long, written: Long, spread: Double,
+        qualityFlags: List<String> = emptyList()) {
         require(effective > restTo && effective > leftTo && effective <= written)
         val previous = calibrationId
         closeSegment(effective, "recalibrated")
@@ -152,7 +153,7 @@ internal class LeanLogWriter(private val file: File, private val id: String,
                 .put("durationUs", leftTo - leftFrom).put("sourceRange", range(leftFrom, leftTo)))
             .put("evidence", JSONObject().put("kind", "manual_rest").put("restDurationUs", restTo - restFrom)
             .put("upSpreadDeg", spread).put("sourceRange", range(restFrom, restTo)))
-            .put("carriedOverFromCalibrationId", JSONObject.NULL).put("algorithmVersion", ALGORITHM))
+            .put("carriedOverFromCalibrationId", JSONObject.NULL).put("algorithmVersion", ALGORITHM), qualityFlags)
         calibrationId = proposed; calibrationBoot = boot; lastTime = effective
         left = null; right = null; eligible = 0; ineligible = 0; window.clear()
     }

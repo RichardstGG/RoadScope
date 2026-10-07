@@ -23,6 +23,11 @@ internal class LeanPipeline(private val log: LeanLogWriter, private val sources:
         val leftFrom: Long, val leftTo: Long, val leftMagnitude: Double, val spread: Double)
     private var pendingManual: Manual? = null
     private var available = false
+    // Only the accelerometer may use the explicitly limited experimental path.
+    // Its platform status is never upgraded; every affected estimate remains
+    // ineligible for extrema, including after status recovery until recalibration.
+    private var experimental = false
+    private var calibrationUnverified = false
     private var pendingReason = "input_clock_state_change"
     private var epochStart = 0L
     private var lastEstimate = -1L
@@ -40,6 +45,11 @@ internal class LeanPipeline(private val log: LeanLogWriter, private val sources:
     var progress: Double = 0.0
         private set
     val snapshot: Map<String, Any?> get() = mapOf("leanState" to if (available) "available" else "unavailable",
+        "leanQualityMode" to when {
+            available && experimental -> "experimental_unverified_accelerometer"
+            calibrationUnverified -> "experimental_unverified_calibration"
+            else -> "standard"
+        },
         "leanAngleDeg" to publishedAngle, "leanMeasurementUs" to publishedTime,
         "leanBlockReason" to blockReason, "leanBlockedSourceIds" to blockedSources,
         "sensorAccuracy" to inputReadiness.mapValues { it.value.accuracy },
@@ -52,10 +62,13 @@ internal class LeanPipeline(private val log: LeanLogWriter, private val sources:
             automatic.saturated -> "candidate_capacity_exceeded"
             else -> "collecting"
         }, "autoReferenceDurationUs" to (activeAutomatic?.accumulatedDurationUs ?: automatic.dominantDurationUs),
-        "autoReferenceCandidateCount" to automatic.candidateCount) + (closedMaxima ?: log.maxima)
+        "autoReferenceCandidateCount" to automatic.candidateCount) +
+        (if (experimental || calibrationUnverified) mapOf("maxLeft" to null, "maxRight" to null)
+            else closedMaxima ?: log.maxima)
 
     fun rideFix(fix: AutoUprightReference.Fix) {
-        if (mount == null && log.calibrationId == null && command == "idle") automatic.updateFix(fix)
+        if (available && !experimental && mount == null && log.calibrationId == null && command == "idle")
+            automatic.updateFix(fix)
     }
 
     fun control(action: String) {
@@ -74,6 +87,7 @@ internal class LeanPipeline(private val log: LeanLogWriter, private val sources:
         log.state(false, if (reason == "raw_write_failure") "raw_write_failed"
             else if (reason == "input_clock_state_change") "input_clock_not_verified" else "input_interrupted", utc, mono)
         available = false; pendingReason = reason; latest.clear(); fusion.reset(); rest.reset()
+        experimental = false
         blockReason = if (reason == "input_clock_state_change") "input_clock_not_verified"
             else if (reason == "raw_write_failure") "raw_write_failed" else "input_interrupted"
         blockedSources = emptyList()
@@ -89,13 +103,17 @@ internal class LeanPipeline(private val log: LeanLogWriter, private val sources:
     fun consume(source: MotionSource, sequence: Long, measured: Long?, received: Long, utc: Long,
         values: DoubleArray, mapId: Int?, computed: Long, accuracy: String? = "high") {
         inputReadiness[source.id] = Readiness(measured != null, accuracy)
+        val experimentalInput = inputReadiness[sources[0].id]?.accuracy == "unreliable"
+        if (available && experimental != experimentalInput) interrupted("after_input_gap", utc, received)
         // Aggregate all sources so healthy gyro/attitude callbacks cannot hide
         // a persistent accelerometer blocker. Clock failures take precedence.
         val blocked = listOf(
             "sensor_unavailable" to sources.filter { !it.available }.map { it.id },
             "awaiting_inputs" to sources.filter { !inputReadiness.containsKey(it.id) }.map { it.id },
             "input_clock_not_verified" to sources.filter { inputReadiness[it.id]?.measured == false }.map { it.id },
-            "sensor_accuracy_unreliable" to sources.filter { inputReadiness[it.id]?.accuracy == "unreliable" }.map { it.id },
+            "sensor_accuracy_unreliable" to sources.filter {
+                it.kind != "accelerometer" && inputReadiness[it.id]?.accuracy == "unreliable"
+            }.map { it.id },
             "sensor_accuracy_unavailable" to sources.filter { inputReadiness[it.id]?.accuracy == null }.map { it.id }
         ).firstOrNull { it.second.isNotEmpty() }
         if (blocked != null) {
@@ -125,7 +143,8 @@ internal class LeanPipeline(private val log: LeanLogWriter, private val sources:
             log.reset(pendingReason, latest.mapValues { it.value.sequence }, utc, received)
             fusion.reset(); fusion.seed(attitude.values)
             fusion.gyro(gyro.time, g)
-            available = true; epochStart = time; blockReason = null; blockedSources = emptyList()
+            available = true; experimental = experimentalInput
+            epochStart = time; blockReason = null; blockedSources = emptyList()
         } else if (source.kind == "gyroscope") fusion.gyro(measured, g)
         if (source.kind != "attitude") return
         val stationary = g.norm() <= 0.035 && abs(a.norm() - 9.80665) <= 0.4
@@ -135,15 +154,18 @@ internal class LeanPipeline(private val log: LeanLogWriter, private val sources:
         // future write time to put calibration after the current evidence.
         val auto = pendingAutomatic
         if (auto != null && time > maxOf(auto.toUs, lastEstimate) && computed >= time) {
-            log.autoCalibrate(auto, time, computed); effective = time; pendingAutomatic = null; activeAutomatic = auto
+            log.autoCalibrate(auto, time, computed); effective = time; pendingAutomatic = null
+            activeAutomatic = auto; calibrationUnverified = false
         }
         val manual = pendingManual
         if (manual != null && time > maxOf(manual.leftTo, lastEstimate) && computed >= time) {
             log.calibrate(manual.mount, manual.restFrom, manual.restTo, manual.leftFrom, manual.leftTo,
-                manual.leftMagnitude, time, computed, manual.spread)
+                manual.leftMagnitude, time, computed, manual.spread,
+                if (experimental) listOf("sensor_accuracy_unreliable") else emptyList())
             effective = time; mount = manual.mount; command = "calibrated"; pendingManual = null; activeAutomatic = null
+            calibrationUnverified = experimental
         }
-        if (mount == null && log.calibrationId == null && command == "idle" && pendingAutomatic == null &&
+        if (!experimental && mount == null && log.calibrationId == null && command == "idle" && pendingAutomatic == null &&
             time - epochStart >= 1_000_000) {
             pendingAutomatic = automatic.add(time, up, g.norm(), a.norm())
         }
@@ -170,6 +192,8 @@ internal class LeanPipeline(private val log: LeanLogWriter, private val sources:
         if (time - epochStart < 1_000_000) flags.add("after_input_gap")
         // Conservative engineering gate, NOT a validated turn-accuracy model.
         if (abs(a.norm() - 9.80665) > 2.0) flags.add("dynamic_acceleration_high")
+        if (experimental) flags.add("sensor_accuracy_unreliable")
+        if (calibrationUnverified) flags.add("calibration_input_unverified")
         if (log.calibrationId != null && mount == null) flags.add("lean_axis_unknown")
         val angle = if (time >= effective && log.calibrationId != null) mount?.angle(up) else null
         log.estimate(time, computed, angle, latest.mapValues { it.value.sequence }, mapId, flags, utc)
@@ -183,6 +207,7 @@ internal class LeanPipeline(private val log: LeanLogWriter, private val sources:
         closedMaxima = log.maxima
         log.closeSegment(mono, reason); publishedAngle = null; publishedTime = null
         available = false; command = "idle"; upright = null; mount = null; progress = 0.0
+        experimental = false; calibrationUnverified = false
         blockReason = "recording_stopped"; blockedSources = emptyList()
         pendingManual = null; pendingAutomatic = null; activeAutomatic = null; automatic.reset(); rest.reset()
     }
