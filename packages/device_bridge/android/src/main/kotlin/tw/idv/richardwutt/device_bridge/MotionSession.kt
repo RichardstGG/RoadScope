@@ -7,6 +7,7 @@ import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Build
 import android.os.SystemClock
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
@@ -44,8 +45,10 @@ internal class MotionSession(private val context: Context, private val id: Strin
     private val sensors = listOfNotNull(manager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER),
         manager.getDefaultSensor(Sensor.TYPE_GYROSCOPE), attitude)
     private val sources = listOf(
-        MotionSource("android-accelerometer", "accelerometer", sensors.any { it.type == Sensor.TYPE_ACCELEROMETER }),
-        MotionSource("android-gyroscope", "gyroscope", sensors.any { it.type == Sensor.TYPE_GYROSCOPE }),
+        MotionSource("android-accelerometer", "accelerometer", sensors.any { it.type == Sensor.TYPE_ACCELEROMETER },
+            storageStride = MotionStoragePolicy.stride(Build.MODEL, "accelerometer")),
+        MotionSource("android-gyroscope", "gyroscope", sensors.any { it.type == Sensor.TYPE_GYROSCOPE },
+            storageStride = MotionStoragePolicy.stride(Build.MODEL, "gyroscope")),
         MotionSource(if (attitude?.type == Sensor.TYPE_GAME_ROTATION_VECTOR) "android-game-rotation-vector"
             else "android-rotation-vector", "attitude", attitude != null,
             if (attitude?.type == Sensor.TYPE_GAME_ROTATION_VECTOR) "game_rotation_vector" else "rotation_vector"),
@@ -57,7 +60,8 @@ internal class MotionSession(private val context: Context, private val id: Strin
     private val writer = MotionLogWriter(File(File(context.filesDir, "motion"), "$id.motion.ndjson"),
         id, version, boot, anchor, sources)
     private val lean = LeanLogWriter(File(File(context.filesDir, "motion"), "$id.lean.ndjson"),
-        id, boot, version, sources.map { it.id }, { writer.counts }, { writer.sync(it) })
+        id, boot, version, sources.map { it.id }, { writer.counts }, { writer.sync(it) },
+        replayable = sources.all { it.storageStride == 1 })
     private val pipeline = LeanPipeline(lean, sources, boot)
     private val rideHint = AtomicReference<AutoUprightReference.Fix?>(null)
     fun rideFix(fix: AutoUprightReference.Fix) {
@@ -72,6 +76,7 @@ internal class MotionSession(private val context: Context, private val id: Strin
     // Sensor looper owns overflow aggregation; writer consumes only immutable packets.
     private val pendingDrops = mutableMapOf<String, Long>()
     private val pendingInvalid = mutableMapOf<String, Long>()
+    private val observedCallbacks = mutableMapOf<String, Long>() // Sensor looper only.
     private val draining = AtomicBoolean(false)
     private val stopping = AtomicBoolean(false)
     @Volatile private var failed = false
@@ -117,6 +122,11 @@ internal class MotionSession(private val context: Context, private val id: Strin
             Sensor.TYPE_GYROSCOPE -> sources[1]
             else -> sources[2]
         }
+        val observed = observedCallbacks[source.id] ?: 0L
+        observedCallbacks[source.id] = observed + 1
+        // Intentional stride skips are not missing samples and never enter the
+        // estimator. Stored sequences advance only after a successful append.
+        if (!MotionStoragePolicy.shouldStore(observed, source.storageStride)) return
         val received = SystemClock.elapsedRealtimeNanos() / 1000
         val uptime = SystemClock.uptimeMillis() * 1000
         val utc = System.currentTimeMillis()

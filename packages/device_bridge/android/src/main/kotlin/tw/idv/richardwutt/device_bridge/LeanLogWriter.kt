@@ -17,6 +17,7 @@ internal class LeanLogWriter(private val file: File, private val id: String,
     private val boot: String, private val version: String,
     private val inputs: List<String>, private val rawCounts: () -> Map<String, Long>,
     private val rawSync: (Long) -> Unit, private val synthetic: Boolean = false,
+    private val replayable: Boolean = true,
     private val appendOverride: ((ByteArray) -> Unit)? = null) : AutoCloseable {
     companion object { const val ALGORITHM = "gyro-rest-up-auto-experimental-v4" }
     private var stream: RandomAccessFile? = null
@@ -115,7 +116,7 @@ internal class LeanLogWriter(private val file: File, private val id: String,
         closeSegment(lastTime, if (calibrationBoot == boot) "recording_interrupted" else "boot_changed")
         event("lean_started", utc, mono, JSONObject().put("platform", "android").put("appVersion", version)
             .put("algorithmVersion", ALGORITHM).put("inputSourceIds", JSONArray(inputs))
-            .put("maxInputGapUs", 100_000).put("replayable", true)
+            .put("maxInputGapUs", 100_000).put("replayable", replayable)
             .put("extremumPolicy", JSONObject().put("policyVersion", "conservative-100ms-v1")
                 .put("rule", "min_abs_in_same_side_window").put("minWindowUs", 100_000)))
         reset(if (epoch < 0) "start" else "recovery", rawCounts(), utc, mono)

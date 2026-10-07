@@ -19,13 +19,16 @@ elapsed 與 uptime 差 ≥2 秒。無法區分時域保持 unverified，測量�
 不得用接收時間替代。運行中失敗／恢復先寫 source_clock_state，不追溯。
 此為保守工程起始門檻，尚無真機證據，不等於證明來源時鐘正確。
 
-stride=1，未降頻；每 0.5 秒與正常停止時 fsync。UTC offset 差 >2 ms
+已量測的 Android 試點機型 21081111RG 對加速度／陀螺儀每四筆 callback 存一筆，姿態仍全存；
+其他未量測機型暫維持 stride=1。前者的 `lean_started.replayable=false`，
+略過 callback 不記為缺樣，且僅成功寫出的 raw 才進融合；因此不宣稱可從
+完整原生輸入精確重播。每 0.5 秒與正常停止時 fsync。UTC offset 差 >2 ms
 新增 clock_map。保留最多 4 筆映射，晚到來源只用測量時刻已生效的映射，
 無可用映射時 clockMapId=null＋clock_map_unavailable，不套未來映射。
 每秒檢查空間，少於 256 MiB 停止 motion 並回報錯誤，
 GPS 不因此停止。實際儲存量只在本機量測與保存。真機曾回報高於請求頻率的
-加速度與陀螺儀回呼，落盤量超出原估；尚未改變 stride=1／可重播政策，
-安排長測前須決定儲存策略。
+加速度與陀螺儀回呼，落盤量超出原估；新有損政策仍須真機核對實際頻率與
+儲存速率，再安排長測。
 缺口、非法輸入、buffer overflow 有事件；raw IO 失敗停止，不盲目重試。
 定位 boot authority 改變時停止 motion，要求重新開始，不默默串接時域。
 
@@ -143,6 +146,7 @@ UI 顯示有效時間與方向未知原因，請停車完成手動校準，不�
 - untested：v4 實際動態融合準確度／漂移、車架固定新版操作、EventChannel 背景生命週期、
   真正程序死亡／斷電的双檔耐久性、Android OEM accuracy、iOS runtime。
   自動參考已做原生管線合成整合／UI mock，真實 GPS 至服務交接仍未實測；
-  完整融合重播比對僅涵蓋合成案例，不涵蓋真機或重選自動校準。
+  完整融合重播比對僅涵蓋 stride=1 的合成案例；有損機型明示不可重播，
+  不涵蓋真機或重選自動校準。
 
 Android V1.0 基礎功能與 UI 真機通過前，不安排 iOS 真機測試。

@@ -179,4 +179,28 @@ class MotionLogWriterTest {
         assertEquals(1, b.poll()); assertTrue(b.offer(4))
         assertEquals(2, b.poll()); assertEquals(4, b.poll()); assertTrue(b.isEmpty())
     }
+    @Test fun `pilot stride stores every fourth callback and declares it without fake drops`() {
+        assertEquals(4, MotionStoragePolicy.stride("21081111RG", "accelerometer"))
+        assertEquals(4, MotionStoragePolicy.stride("21081111RG", "gyroscope"))
+        assertEquals(1, MotionStoragePolicy.stride("21081111RG", "attitude"))
+        assertEquals(1, MotionStoragePolicy.stride("unmeasured-model", "accelerometer"))
+        assertEquals(listOf(0L, 4L, 8L), (0L..11L).filter {
+            MotionStoragePolicy.shouldStore(it, 4)
+        })
+        val lossy = sources[0].copy(storageStride = 4)
+        assertEquals(4, lossy.declaration().getInt("storageStride"))
+        val file = fixture("pilot-storage-stride")
+        MotionLogWriter(file, "synthetic-motion", "test+1", "boot-a", utc - 1000,
+            listOf(lossy), synthetic = true).use { w ->
+            w.start(utc, 1_000_000)
+            w.clock(lossy.id, true, utc, 1_000_000)
+            (0L..11L).filter { MotionStoragePolicy.shouldStore(it, 4) }.forEachIndexed { i, _ ->
+                val time = 1_100_000L + i * 20_000L
+                w.sample(lossy, time, time + 1000, utc + i * 20L, "unreliable",
+                    doubleArrayOf(0.0, 0.0, 9.80665))
+            }
+            assertEquals(3L, w.counts[lossy.id])
+        }
+        assertFalse(file.readLines().any { it.contains("samples_dropped") })
+    }
 }

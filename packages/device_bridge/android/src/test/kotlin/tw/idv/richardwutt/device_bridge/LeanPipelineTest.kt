@@ -19,14 +19,18 @@ class LeanPipelineTest {
         return File(File(base, "native-lean-fixtures").apply { mkdirs() }, name)
     }
     private inner class Harness(val name: String, val boot: String = "boot-a", initial: Long = 1_000_000,
-        fresh: Boolean = true) : AutoCloseable {
+        fresh: Boolean = true, lossy: Boolean = false) : AutoCloseable {
         val motionFile = fixture("$name.motion.ndjson")
         val leanFile = fixture("$name.lean.ndjson")
         init { if (fresh) { motionFile.delete(); leanFile.delete() } }
-        val raw = MotionLogWriter(motionFile, "synthetic-lean", "test", boot, utc - 1000, sources, synthetic = true)
-        val log = LeanLogWriter(leanFile, "synthetic-lean", boot, "test", sources.map { it.id },
-            { raw.counts }, { raw.sync(it) }, synthetic = true)
-        val pipeline = LeanPipeline(log, sources, boot)
+        private val sessionSources = if (lossy) sources.map {
+            if (it.kind in setOf("accelerometer", "gyroscope")) it.copy(storageStride = 4) else it
+        } else sources
+        val raw = MotionLogWriter(motionFile, "synthetic-lean", "test", boot, utc - 1000,
+            sessionSources, synthetic = true)
+        val log = LeanLogWriter(leanFile, "synthetic-lean", boot, "test", sessionSources.map { it.id },
+            { raw.counts }, { raw.sync(it) }, synthetic = true, replayable = !lossy)
+        val pipeline = LeanPipeline(log, sessionSources, boot)
         var time = initial
         private var roll = 0.0
         init { raw.start(utc, time); log.start(utc, time) }
@@ -40,7 +44,7 @@ class LeanPipelineTest {
             val values = listOf(doubleArrayOf(0.0, sin(radians) * force, cos(radians) * force),
                 gyroOverride ?: doubleArrayOf(rate, 0.0, 0.0),
                 doubleArrayOf(cos(radians / 2), sin(radians / 2), 0.0, 0.0))
-            sources.forEachIndexed { index, source ->
+            sessionSources.forEachIndexed { index, source ->
                 val previous = raw.clockStates[source.id]
                 raw.clock(source.id, verified, utc + time / 1000, time + 1000)
                 if (previous != raw.clockStates[source.id]) pipeline.interrupted("input_clock_state_change", utc + time / 1000, time + 1000)
@@ -219,6 +223,21 @@ class LeanPipelineTest {
             assertTrue(h.log.maxima.values.all { it == null })
             h.pipeline.stopped(h.time, "recording_stopped")
             assertTrue(LeanReplayAssertions.verify(h.motionFile, h.leanFile) > 0)
+        }
+    }
+    @Test fun `lossy source declarations never claim complete epoch replay`() {
+        Harness("lossy-stride-lean", lossy = true).use { h ->
+            h.calibrate(listOf("unreliable", "high", "high"))
+            val started = h.rows().first { it.optString("eventType") == "lean_started" }
+            assertFalse(started.getBoolean("replayable"))
+            val motionStarted = h.motionFile.readLines().map(::JSONObject)
+                .first { it.optString("eventType") == "motion_started" }
+            val declarations = motionStarted.getJSONArray("sources")
+            assertEquals(listOf(4, 4, 1), (0 until declarations.length()).map {
+                declarations.getJSONObject(it).getInt("storageStride")
+            })
+            assertNotNull(h.pipeline.snapshot["leanAngleDeg"])
+            h.pipeline.stopped(h.time, "recording_stopped")
         }
     }
     @Test fun `other unreliable sources still block experimental path`() {

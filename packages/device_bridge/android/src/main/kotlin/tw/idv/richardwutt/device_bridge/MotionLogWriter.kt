@@ -9,16 +9,29 @@ import java.nio.charset.CodingErrorAction
 import java.time.Instant
 
 internal data class MotionSource(val id: String, val kind: String, val available: Boolean,
-    val reference: String? = null) {
+    val reference: String? = null, val storageStride: Int = 1) {
+    init { require(storageStride >= 1) }
     fun declaration() = JSONObject().apply {
         put("sourceId", id); put("sensorType", kind); put("available", available)
         put("measurementClock", if (available) "unverified" else "unavailable")
         if (available) {
             put("axisFrame", "android_sensor"); put("platformFused", kind == "attitude")
             put("requestedSamplingPeriodUs", 20_000); put("maxReportLatencyUs", 0)
-            put("storageStride", 1); put("gapThresholdUs", 100_000)
+            put("storageStride", storageStride); put("gapThresholdUs", 100_000)
             if (kind == "attitude") put("attitudeReference", reference)
         } else put("unavailableReason", "sensor_not_available")
+    }
+}
+
+/** Pilot-device override: retain approximately the requested rate when its
+ * callbacks arrive faster than requested. Other models remain full-fidelity
+ * until their actual callback cadence has been measured. */
+internal object MotionStoragePolicy {
+    fun stride(model: String, kind: String): Int =
+        if (model == "21081111RG" && kind in setOf("accelerometer", "gyroscope")) 4 else 1
+    fun shouldStore(callbackIndex: Long, stride: Int): Boolean {
+        require(callbackIndex >= 0 && stride >= 1)
+        return callbackIndex % stride == 0L
     }
 }
 
