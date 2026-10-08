@@ -1,5 +1,31 @@
 # C1 手機端可實作性與參考驗證器復核
 
+## 最終復核：36662fa（2026-10-08）
+
+已核對遠端 `36662faa0b4bc7de2a6a86b39d104f28d5722cee` 與實際差異。
+**C1-1、C1-2、C1-3 全部關閉；C1 手機端可實作性復核通過。**
+本提交可作 S2 的寫入規格與 C2 的小檔參考基準；新格式開始寫入仍遵守共同規則的
+契約 review／合併條件。這不代表 PR 已核准、契約已合併或手機端已驗收。
+以下舊節保留審查脈絡，最新結論以本節為準。
+
+- automated tests：固定提交的獨立暫存副本 npm test 成功，21 location fixtures、
+  274 v2 檔案一致、345 motion／lean 檢查；Codex 的四個反例全部被拒絕，exit 0。
+- static validation：義務只由對應 disabled 事件完成，缺 reset 另報 error；
+  錯誤補寫不清除不可撤銷的違規，resume／新 lean_started／EOF 保留歷史缺口。
+  已核對 16 列狀態表與規範文字，未發現新的本輪阻擋。
+- 接受 AUTO_STATE_TRANSITION_UNSETTLED 在未結算邊界為 warning：它不改寫或丟棄有效資料，
+  calibration=true 仍報 CALIBRATION_REPLAY_STATE_INCOMPLETE；同 pipeline 的非法繼續仍為 error。
+  正常手機停止路徑必須完成控制事件，不能把此容錯當成可省略事件的理由；由 writer 測試驗收。
+- mock／manual／hardware tests：本輪未執行。v2 writer、Kotlin 完整重播、C2 大檔資源、
+  私有 V1-4／V1-5 與 S5 精度／容量仍 untested。
+- 修改前 PR #11 a686727 Android／iOS CI 均成功；C1 尚無 PR，GitHub contracts CI 尚未執行。
+
+下一步：手機端先 S1；契約端下一切片 C2，以修正後 345 項及四個 consumer 反例保留語義。
+C3 仍等待 S5 合成量測。C1 需按既有 PR 流程接受 review 與 CI；Codex 本輪只交付復核，
+未代開契約 PR、核准或合併。使用者本輪無需操作手機或執行指令。
+
+---
+
 ## 修正復核：8f2a123（2026-10-08）
 
 核對遠端 `8f2a1238febc7e8c9acd922c882aeaa7c6d25f5b`。獨立固定副本重跑成功：
