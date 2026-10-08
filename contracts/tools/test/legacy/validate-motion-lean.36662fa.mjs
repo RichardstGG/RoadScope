@@ -1,25 +1,22 @@
-#!/usr/bin/env node
+// FROZEN COPY of contracts/tools/validate-motion-lean.mjs at 36662fa: the C1 in-memory reference that
+// Codex accepted (345 checks + four consumer counterexamples). C2 must reproduce its findings exactly on
+// every fixture; test/run-differential.mjs compares them. Do not edit except for the schema path.
 // Validates the raw motion log and the derived lean log against
 // contracts/motion-lean/v1 and v2 (the version is read from the file; a file
 // holds exactly one version). The schemas cover one record; this tool adds the
 // cross-line rules a schema cannot express: sequence continuity, monotonic
 // direction, clock-map references, calibration segmentation and extrema.
-// Usage: see USAGE below. A lean file is checked against a motion file only when --motion is given.
-// Exit codes: 0 pass, 1 errors, 2 usage, 3 capacity / IO / unsupported runtime (never a pass),
-// 4 unsupported schemaVersion, 130 cancelled.
-// One rule set, two index backends (lib/store.mjs): plain Maps for small inputs, an on-disk SQLite
-// index for large ones, so memory does not grow with the input. Lines are streamed (lib/io.mjs).
-// The C1 reference (test/legacy/validate-motion-lean.36662fa.mjs) is the oracle: both backends must
-// reproduce its findings exactly (test/run-differential.mjs).
+// Usage: node validate-motion-lean.mjs [--json] [--motion <motion.ndjson>] [--parent <old.lean.ndjson>] <file.ndjson> [...]
+// A lean file is checked against a motion file only when --motion is given.
+// Exit codes: 0 pass, 1 errors, 2 usage, 4 unsupported schemaVersion.
+// This is the in-memory reference implementation (C1). The bounded, disk-indexed
+// engine (C2) must reproduce its results on small inputs.
 
-import { readFileSync, mkdtempSync, rmSync, writeFileSync, readdirSync, statSync, statfsSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { dirname, join, resolve } from 'node:path';
-import { hostname, tmpdir } from 'node:os';
+import { dirname, resolve } from 'node:path';
 import Ajv2020 from 'ajv/dist/2020.js';
-import { BufferInput, CancelledError, CapacityError, DEFAULT_MAX_LINE_BYTES, FileInput, FileSink, MemorySink, ResourceGuard, prefixDigest } from './lib/io.mjs';
-import { MemoryStore, SqliteStore } from './lib/store.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const SUPPORTED_VERSIONS = [1, 2];
@@ -163,7 +160,7 @@ const SKEW_WARN_US = 10_000_000;
 
 const ajv = new Ajv2020({ allErrors: true, strict: false });
 for (const version of SUPPORTED_VERSIONS) {
-  const dir = resolve(here, `../motion-lean/v${version}`);
+  const dir = resolve(here, `../../../motion-lean/v${version}`);
   for (const name of ['common', 'motion', 'lean']) {
     ajv.addSchema(JSON.parse(readFileSync(resolve(dir, `${name}.schema.json`), 'utf8')));
   }
@@ -180,9 +177,8 @@ function subSchema(file, name) {
 // The version of a file is that of its first record carrying an integer
 // schemaVersion. Absent everywhere, the file is validated as v1 (and every line
 // fails its schema anyway).
-export function detectSchemaVersion(textOrInput) {
-  const input = typeof textOrInput === 'string' ? new BufferInput(Buffer.from(textOrInput, 'utf8')) : textOrInput;
-  for (const { raw } of input.lines(Number.MAX_SAFE_INTEGER)) {
+export function detectSchemaVersion(text) {
+  for (const raw of text.split('\n')) {
     if (raw.trim() === '') continue;
     try {
       const record = JSON.parse(raw);
@@ -194,98 +190,69 @@ export function detectSchemaVersion(textOrInput) {
   return null;
 }
 
-function unsupportedResult(kind, version, sink = new MemorySink()) {
-  const report = newReport(sink);
+function unsupportedResult(kind, version) {
+  const report = newReport();
   report.add('UNSUPPORTED_SCHEMA_VERSION', 1, `schemaVersion ${version} is not supported (known: ${SUPPORTED_VERSIONS.join(', ')})`);
   return finish(report, { kind, samples: 0, records: 0, events: 0, unknownRecords: 0, unsupported: true, version });
 }
 
 // ---------------------------------------------------------------- shared
 
-// Findings go to a sink (lib/io.mjs): kept in memory for the library API, streamed to a file by the
-// CLI so that a run with millions of findings does not hold them.
-function newReport(sink = new MemorySink()) {
+function newReport() {
+  const findings = [];
   return {
-    sink,
-    add: (code, line, detail) => sink.push({ code, severity: severityOf(code), line, detail }),
+    findings,
+    add: (code, line, detail) => findings.push({ code, severity: severityOf(code), line, detail }),
   };
 }
 
 function finish(report, extra) {
-  const { sink } = report;
-  sink.close();
-  const errorCount = sink.errors;
+  const errorCount = report.findings.filter((f) => f.severity === ERROR).length;
   return {
     ok: errorCount === 0,
-    findings: sink instanceof MemorySink ? sink.findings : [],
+    findings: report.findings,
     errorCount,
-    warnCount: sink.total - errorCount,
+    warnCount: report.findings.length - errorCount,
     ...extra,
-    ...(sink instanceof FileSink ? { findingsFile: sink.path } : {}),
   };
 }
 
-// Every finding of a result, whichever sink produced it.
-export function* findingsOf(result, sink) {
-  if (sink) yield* sink.all();
-  else yield* result.findings;
-}
-
-// Parses one line; reports the line-level failure modes shared by both logs. Returns the record to
-// validate, or null.
-function parseRecord(raw, line, knownTypes, add, counters) {
-  if (raw.trim() === '') return null;
-  let record;
-  try {
-    record = JSON.parse(raw);
-  } catch (error) {
-    add('NOT_JSON', line, error.message);
-    return null;
+// Yields parsed records with their line number; reports the three line-level
+// failure modes shared by both logs.
+function* records(text, knownTypes, add, counters) {
+  const lines = text.split('\n');
+  for (let index = 0; index < lines.length; index += 1) {
+    const raw = lines[index];
+    const line = index + 1;
+    if (raw.trim() === '') continue;
+    let record;
+    try {
+      record = JSON.parse(raw);
+    } catch (error) {
+      add('NOT_JSON', line, error.message);
+      continue;
+    }
+    if (record === null || typeof record !== 'object' || Array.isArray(record)) {
+      add('NOT_JSON', line, 'record must be a JSON object');
+      continue;
+    }
+    if (record.recordType === undefined) {
+      add('MISSING_RECORD_TYPE', line, 'recordType is required');
+      continue;
+    }
+    if (!knownTypes.has(record.recordType)) {
+      // A known field with an unknown value is a newer writer (or another
+      // log's line): preserve it, count it, keep going.
+      counters.unknown += 1;
+      add('UNKNOWN_RECORD_TYPE', line, String(record.recordType));
+      continue;
+    }
+    if (Number.isInteger(record.schemaVersion) && record.schemaVersion !== V) {
+      add('SCHEMA_VERSION_MIXED', line, `schemaVersion ${record.schemaVersion} in a schemaVersion ${V} file`);
+      continue;
+    }
+    yield { record, line };
   }
-  if (record === null || typeof record !== 'object' || Array.isArray(record)) {
-    add('NOT_JSON', line, 'record must be a JSON object');
-    return null;
-  }
-  if (record.recordType === undefined) {
-    add('MISSING_RECORD_TYPE', line, 'recordType is required');
-    return null;
-  }
-  if (!knownTypes.has(record.recordType)) {
-    // A known field with an unknown value is a newer writer (or another
-    // log's line): preserve it, count it, keep going.
-    counters.unknown += 1;
-    add('UNKNOWN_RECORD_TYPE', line, String(record.recordType));
-    return null;
-  }
-  if (Number.isInteger(record.schemaVersion) && record.schemaVersion !== V) {
-    add('SCHEMA_VERSION_MIXED', line, `schemaVersion ${record.schemaVersion} in a schemaVersion ${V} file`);
-    return null;
-  }
-  return record;
-}
-
-// ---------------------------------------------------------------- drivers
-
-// A validator is { line(item), end() -> result }. The sync driver serves the library API; the async
-// driver serves the CLI and yields to the event loop so that cancellation signals are seen.
-function runSync(validator, input, store, maxLineBytes) {
-  for (const item of input.lines(maxLineBytes)) {
-    store.tick();
-    validator.line(item);
-  }
-  return validator.end();
-}
-
-async function runAsync(validator, input, store, { maxLineBytes, guard }) {
-  let count = 0;
-  for (const item of input.lines(maxLineBytes)) {
-    store.tick();
-    validator.line(item);
-    guard.check(item.offset);
-    count += 1;
-    if (count % 4096 === 0) await new Promise((done) => setImmediate(done));
-  }
-  return validator.end();
 }
 
 function schemaCheck(file, defName, record, line, add) {
@@ -322,40 +289,28 @@ function canonicalJson(value) {
 const norm = (v) => Math.hypot(v.x, v.y, v.z);
 const dot = (a, b) => a.x * b.x + a.y * b.y + a.z * b.z;
 
-// Tracks one (recordingId, sourceId) sequence space: two scalars in the store's `space:<ns>` map.
-// The sequences seen live in the store's sequence index.
-function spaceGetter(store, ns) {
-  const spaces = store.kv(`space:${ns}`);
-  return (source) => {
-    let space = spaces.get(source);
-    if (space === undefined) {
-      space = { maxSequence: -1, expectedNext: null };
-      spaces.set(source, space);
-    }
-    return space;
-  };
+// Tracks one (recordingId, sourceId) sequence space.
+function newSequenceSpace() {
+  return { seen: new Map(), maxSequence: -1, expectedNext: null };
 }
 
-// Duplicate or conflict, by canonical JSON (key order is irrelevant). The index keeps a 16-byte hash
-// of the first occurrence's canonical JSON and where the line is: a different hash is certainly a
-// conflict; an equal hash is confirmed by re-reading that line and comparing canonical JSON, so a
-// hash collision can never turn a conflict into a duplicate. Returns where this line is, for the index.
-function applySequence(ctx, ns, space, record, item, add, label) {
-  const { line } = item;
+function applySequence(space, record, line, add, label) {
   const canonical = canonicalJson(record);
-  const hash = createHash('sha256').update(canonical).digest().subarray(0, 16);
-  const previous = ctx.store.seqGet(ns, record.sourceId, record.sequence);
+  const previous = space.seen.get(record.sequence);
   if (previous !== undefined) {
-    const sameHash = Buffer.compare(Buffer.from(previous.first.hash), hash) === 0;
-    const same = sameHash && canonicalJson(JSON.parse(ctx.input.readAt(previous.first.offset, previous.first.length))) === canonical;
-    add(same ? 'SEQUENCE_DUPLICATE' : 'SEQUENCE_CONFLICT', line, `${label} sequence ${record.sequence} already present`);
+    add(
+      previous === canonical ? 'SEQUENCE_DUPLICATE' : 'SEQUENCE_CONFLICT',
+      line,
+      `${label} sequence ${record.sequence} already present`,
+    );
+  } else {
+    space.seen.set(record.sequence, canonical);
   }
   if (space.expectedNext !== null && record.sequence > space.expectedNext) {
     add('SEQUENCE_GAP', line, `${label} expected ${space.expectedNext}, found ${record.sequence}`);
   }
   space.expectedNext = Math.max(space.expectedNext ?? 0, record.sequence + 1);
   space.maxSequence = Math.max(space.maxSequence, record.sequence);
-  return { hash, offset: item.offset, length: item.length };
 }
 
 // A boot change must be declared by an event placed before the first record
@@ -371,88 +326,80 @@ function trackBoot(state, record, declaring, line, add) {
   state.lastBootId = record.deviceBootId;
 }
 
-// `lastByKey` is a store map keyed by `${scope}\u0000${bootId}`.
-function checkMonotonic(lastByKey, scope, bootId, value, ctx) {
-  const key = `${scope}\u0000${bootId}`;
-  const last = lastByKey.get(key);
+function checkMonotonic(lastByBoot, bootId, value, ctx) {
+  const last = lastByBoot.get(bootId);
   if (last !== undefined && value < last) {
     ctx.add(ctx.code, ctx.line, `${ctx.field} ${value} < ${last} within deviceBootId ${bootId}`);
   }
-  lastByKey.set(key, value);
+  lastByBoot.set(bootId, value);
 }
 
 // ---------------------------------------------------------------- motion
 
-export function validateMotionLog(text, options = {}) {
-  const input = new BufferInput(Buffer.from(text, 'utf8'));
-  const version = detectSchemaVersion(input) ?? 1;
-  if (!SUPPORTED_VERSIONS.includes(version)) return unsupportedResult('motion', version, options.sink);
-  const store = options.store ?? new MemoryStore();
-  return runSync(createMotionValidator({ version, store, input, sink: options.sink }), input, store, options.maxLineBytes ?? DEFAULT_MAX_LINE_BYTES);
-}
-
-function createMotionValidator({ version, store, input, sink }) {
+export function validateMotionLog(text) {
+  const version = detectSchemaVersion(text) ?? 1;
+  if (!SUPPORTED_VERSIONS.includes(version)) return unsupportedResult('motion', version);
   V = version;
-  const report = newReport(sink);
+  const report = newReport();
   const { add } = report;
-  const ctx = { store, input };
   const counters = { unknown: 0 };
-  const spaceOf = spaceGetter(store, 'motion');
+  const spaces = new Map();
+  const spaceOf = (source) => {
+    if (!spaces.has(source)) spaces.set(source, newSequenceSpace());
+    return spaces.get(source);
+  };
   const state = {
     lastBootId: null,
     started: false,
-    declared: new Map(), // sourceId -> declaration of the latest motion_started (one record: bounded)
-    clockState: store.kv('clockState'), // sourceId -> measurementClock in force at this point of the file
+    declared: new Map(), // sourceId -> declaration of the latest motion_started
+    clockState: new Map(), // sourceId -> measurementClock in force at this point of the file
     segmentOpen: false, // true between a motion_started and the next session boundary
     sessionOrdinal: -1,
     controlLast: -1,
-    sel: new Map(), // sourceId -> selection / accuracy tracking (v2); the current session's sources only
-    lastSeen: store.kv('lastSeen'), // sourceId -> {sequence, boot} of the previous sample
-    clockMaps: store.kv('clockMaps'), // mapId -> {mapId, deviceBootId}
-    lastMeasurement: store.kv('lastMeasurement'), // `${sourceId}\u0000${bootId}` -> us
-    lastReceived: store.kv('lastReceived'),
-    lastTime: store.kv('lastTime'), // sourceId -> {boot, us} for gap detection
+    sel: new Map(), // sourceId -> selection / accuracy tracking (v2)
+    lastSeen: new Map(), // sourceId -> {sequence, boot} of the previous sample
+    clockMaps: new Map(), // mapId -> event
+    lastMeasurement: new Map(), // sourceId -> Map(bootId -> us)
+    lastReceived: new Map(),
+    lastTime: new Map(), // sourceId -> {boot, us} for gap detection
+    cover: new Map(), // sourceId -> [{boot, from, to}]
+    allCover: [],
     lastLine: 1,
   };
-  // The model a paired lean validation reads. Sequences, breaks (points where a source's input is not
-  // continuous: nextSeq is the first sequence after one) and per-session declarations live in the store.
-  const model = { version, store, maxSeq: store.kv('maxSeq'), maxControl: -1 };
+  // `breaks` are points where a source's input is not continuous: a replay or
+  // an estimate must not straddle one. nextSeq is the first sequence after it.
+  // `sessions[i]` holds the declarations of the i-th session: a sample or a
+  // reference is judged by the declaration of the session it was written in.
+  const model = { version, sequences: new Map(), maxSeq: new Map(), breaks: new Map(), sessions: [], maxControl: -1 };
   let sampleCount = 0;
   let eventCount = 0;
 
-  return {
-    line(item) {
-      const record = parseRecord(item.raw, item.line, MOTION_RECORD_TYPES, add, counters);
-      if (record === null) return;
-      const { line } = item;
-      state.lastLine = line;
-      if (record.recordType === 'motion_event') {
-        if (!checkMotionEvent(record, line, add)) {
-          // A rejected event still consumed its controlSequence: do not cascade into a gap report.
-          if (V === 2 && Number.isInteger(record.controlSequence)) state.controlLast = Math.max(state.controlLast, record.controlSequence);
-          return;
-        }
-        eventCount += 1;
-        applyMotionEvent(state, spaceOf, record, line, add, model);
-        return;
+  for (const { record, line } of records(text, MOTION_RECORD_TYPES, add, counters)) {
+    state.lastLine = line;
+    if (record.recordType === 'motion_event') {
+      if (!checkMotionEvent(record, line, add)) {
+        // A rejected event still consumed its controlSequence: do not cascade into a gap report.
+        if (V === 2 && Number.isInteger(record.controlSequence)) state.controlLast = Math.max(state.controlLast, record.controlSequence);
+        continue;
       }
-      if (!checkMotionSample(record, line, add)) return;
-      sampleCount += 1;
-      applyMotionSample(ctx, state, spaceOf(record.sourceId), record, item, add, model);
-    },
-    end() {
-      V = version;
-      if (V === 2) warnUnsettled(state, state.lastLine, add);
-      return finish(report, {
-        kind: 'motion',
-        version,
-        samples: sampleCount,
-        events: eventCount,
-        unknownRecords: counters.unknown,
-        model,
-      });
-    },
-  };
+      eventCount += 1;
+      applyMotionEvent(state, spaceOf, record, line, add, model);
+      continue;
+    }
+    if (!checkMotionSample(record, line, add)) continue;
+    sampleCount += 1;
+    applyMotionSample(state, spaceOf(record.sourceId), record, line, add, model);
+  }
+  if (V === 2) warnUnsettled(state, state.lastLine, add);
+
+  return finish(report, {
+    kind: 'motion',
+    version,
+    samples: sampleCount,
+    events: eventCount,
+    unknownRecords: counters.unknown,
+    model,
+  });
 }
 
 function warnUnsettled(state, line, add) {
@@ -573,8 +520,8 @@ function applyMotionEvent(state, spaceOf, record, line, add, model) {
       }
       state.clockState.set(record.sourceId, record.measurementClock);
       // Leaving or entering elapsed_realtime interrupts the usable input.
-      model.store.addBreak(record.sourceId, record.deviceBootId, spaceOf(record.sourceId).maxSequence + 1);
-      model.store.addCover(record.sourceId, record.deviceBootId, 0, record.occurredMonotonicUs);
+      pushTo(model.breaks, record.sourceId, { boot: record.deviceBootId, nextSeq: spaceOf(record.sourceId).maxSequence + 1 });
+      pushTo(state.cover, record.sourceId, { boot: record.deviceBootId, from: 0, to: record.occurredMonotonicUs });
       const sel = state.sel.get(record.sourceId);
       if (V === 2 && sel?.policy) {
         sel.needAnchor = true;
@@ -586,7 +533,7 @@ function applyMotionEvent(state, spaceOf, record, line, add, model) {
       if (state.clockMaps.has(record.mapId)) {
         add('CLOCK_MAP_ID_REUSED', line, `mapId ${record.mapId} already defined`);
       } else {
-        state.clockMaps.set(record.mapId, { mapId: record.mapId, deviceBootId: record.deviceBootId });
+        state.clockMaps.set(record.mapId, record);
       }
       break;
     }
@@ -595,8 +542,9 @@ function applyMotionEvent(state, spaceOf, record, line, add, model) {
       // Unknown bounds: the loss lies between the last sample seen and now.
       const from = record.firstDroppedMonotonicUs ?? times?.us ?? 0;
       const to = record.lastDroppedMonotonicUs ?? record.occurredMonotonicUs;
-      model.store.addCover(record.sourceId, record.deviceBootId, from, to);
-      model.store.addBreak(record.sourceId, record.deviceBootId, spaceOf(record.sourceId).maxSequence + 1);
+      const entry = { boot: record.deviceBootId, from, to };
+      pushTo(state.cover, record.sourceId, entry);
+      pushTo(model.breaks, record.sourceId, { boot: record.deviceBootId, nextSeq: spaceOf(record.sourceId).maxSequence + 1 });
       const sel = state.sel.get(record.sourceId);
       if (V === 2 && sel?.policy) {
         sel.needAnchor = true;
@@ -610,7 +558,7 @@ function applyMotionEvent(state, spaceOf, record, line, add, model) {
       for (const [source, next] of Object.entries(record.resumedSequences)) {
         spaceOf(source).expectedNext = next;
       }
-      model.store.addCover(null, record.deviceBootId, 0, record.occurredMonotonicUs);
+      state.allCover.push({ boot: record.deviceBootId, from: 0, to: record.occurredMonotonicUs });
       break;
     }
     case 'selection_anchor':
@@ -632,10 +580,11 @@ function applyMotionStarted(state, record, line, add, model) {
   const newSession = !state.segmentOpen;
   if (newSession) {
     if (V === 2) warnUnsettled(state, line, add);
-    state.sessionOrdinal = model.store.sessionPush();
+    state.sessionOrdinal += 1;
+    model.sessions.push(new Map());
     state.sel = new Map();
   }
-  const session = state.sessionOrdinal;
+  const sessionDecls = model.sessions[state.sessionOrdinal];
   for (const source of record.sources) {
     // A repeated motion_started inside one session must not rewrite a clock
     // state that source_clock_state events own.
@@ -651,7 +600,7 @@ function applyMotionStarted(state, record, line, add, model) {
       if ((!hasPolicy && source.storageStride === null) || (hasPolicy && source.storageStride === 1)) {
         add('STRIDE_POLICY_CONFLICT', line, `${source.sourceId}: inputPolicy ${hasPolicy ? 'present' : 'absent'} with storageStride ${source.storageStride}`);
       }
-      const before = model.store.sessionDecl(session, source.sourceId);
+      const before = sessionDecls.get(source.sourceId);
       if (!newSession && before) {
         for (const field of ['inputPolicy', 'storageStride', 'gapThresholdUs', 'requestedSamplingPeriodUs']) {
           if (canonicalJson(before[field] ?? null) !== canonicalJson(source[field] ?? null)) {
@@ -662,7 +611,7 @@ function applyMotionStarted(state, record, line, add, model) {
         state.sel.set(source.sourceId, newSelection(source));
       }
     }
-    model.store.sessionSetDecl(session, source.sourceId, source);
+    sessionDecls.set(source.sourceId, source);
   }
   state.segmentOpen = true;
   state.declared = new Map(record.sources.map((s) => [s.sourceId, s]));
@@ -752,8 +701,12 @@ function applySelectionStats(state, record, line, add) {
   sel.bufferDropped = 0;
 }
 
-function applyMotionSample(ctx, state, space, record, item, add, model) {
-  const { line } = item;
+function pushTo(map, key, value) {
+  if (!map.has(key)) map.set(key, []);
+  map.get(key).push(value);
+}
+
+function applyMotionSample(state, space, record, line, add, model) {
   if (!state.started) {
     add('MISSING_MOTION_STARTED', line, 'log does not open with motion_started');
     state.started = true; // report once
@@ -783,19 +736,20 @@ function applyMotionSample(ctx, state, space, record, item, add, model) {
   if (V === 2) checkSelection(state, record, line, add);
 
   const previousSeen = state.lastSeen.get(record.sourceId);
-  const first = applySequence(ctx, 'motion', space, record, item, add, record.sourceId);
+  applySequence(space, record, line, add, record.sourceId);
   trackBoot(state, record, false, line, add);
   if (previousSeen && record.sequence > previousSeen.sequence) {
     // A sequence hole (truncation) or a boot change also breaks continuity.
     if (record.sequence !== previousSeen.sequence + 1 || previousSeen.boot !== record.deviceBootId) {
-      model.store.addBreak(record.sourceId, record.deviceBootId, record.sequence);
+      pushTo(model.breaks, record.sourceId, { boot: record.deviceBootId, nextSeq: record.sequence });
     }
   }
   if (!previousSeen || record.sequence > previousSeen.sequence) {
     state.lastSeen.set(record.sourceId, { sequence: record.sequence, boot: record.deviceBootId });
   }
 
-  checkMonotonic(state.lastReceived, record.sourceId, record.deviceBootId, record.receivedMonotonicUs, {
+  const received = bootMap(state.lastReceived, record.sourceId);
+  checkMonotonic(received, record.deviceBootId, record.receivedMonotonicUs, {
     add,
     line,
     code: 'MONOTONIC_REGRESSION',
@@ -804,7 +758,7 @@ function applyMotionSample(ctx, state, space, record, item, add, model) {
 
   const measured = record.measurementMonotonicUs;
   if (measured !== null) {
-    checkMonotonic(state.lastMeasurement, record.sourceId, record.deviceBootId, measured, {
+    checkMonotonic(bootMap(state.lastMeasurement, record.sourceId), record.deviceBootId, measured, {
       add,
       line,
       code: 'MEASUREMENT_MONOTONIC_REGRESSION',
@@ -817,7 +771,7 @@ function applyMotionSample(ctx, state, space, record, item, add, model) {
     } else if (record.receivedMonotonicUs - measured > SKEW_WARN_US) {
       add('MEASUREMENT_RECEIVED_SKEW', line, `callback ${(record.receivedMonotonicUs - measured) / 1e6}s after measurement`);
     }
-    detectGap(ctx, state, record, measured, line, add);
+    detectGap(state, record, measured, line, add);
   }
 
   if (record.clockMapId !== null) {
@@ -829,8 +783,9 @@ function applyMotionSample(ctx, state, space, record, item, add, model) {
     }
   }
 
+  if (!model.sequences.has(record.sourceId)) model.sequences.set(record.sourceId, new Map());
   model.maxSeq.set(record.sourceId, Math.max(model.maxSeq.get(record.sourceId) ?? -1, record.sequence));
-  model.store.seqPut('motion', record.sourceId, record.sequence, first, {
+  model.sequences.get(record.sourceId).set(record.sequence, {
     boot: record.deviceBootId,
     measurementUs: measured,
     session: state.sessionOrdinal,
@@ -875,137 +830,127 @@ function checkSelection(state, record, line, add) {
   }
 }
 
-function detectGap(ctx, state, record, measured, line, add) {
+function bootMap(map, key) {
+  if (!map.has(key)) map.set(key, new Map());
+  return map.get(key);
+}
+
+function detectGap(state, record, measured, line, add) {
   const previous = state.lastTime.get(record.sourceId);
   state.lastTime.set(record.sourceId, { boot: record.deviceBootId, us: measured });
   if (!previous || previous.boot !== record.deviceBootId) return;
   const declaration = state.declared.get(record.sourceId);
   if (!declaration || declaration.available === false) return;
   if (measured - previous.us <= declaration.gapThresholdUs) return;
-  // Covered by a samples_dropped / clock-state interval of this source, or a resume / truncation of all.
-  if (!ctx.store.coverOverlaps(record.sourceId, record.deviceBootId, previous.us, measured)) {
+  const overlaps = (c) => c.boot === record.deviceBootId && c.from <= measured && c.to >= previous.us;
+  const covered =
+    (state.cover.get(record.sourceId) ?? []).some(overlaps) || state.allCover.some(overlaps);
+  if (!covered) {
     add('MOTION_TIME_GAP', line, `${record.sourceId} gap of ${measured - previous.us} us exceeds gapThresholdUs ${declaration.gapThresholdUs} with no samples_dropped or resume event`);
   }
 }
 
 // ---------------------------------------------------------------- lean
 
-export function validateLeanLog(text, options = {}) {
-  const input = new BufferInput(Buffer.from(text, 'utf8'));
-  const version = detectSchemaVersion(input) ?? 1;
-  if (!SUPPORTED_VERSIONS.includes(version)) return unsupportedResult('lean', version, options.sink);
-  const store = options.store ?? new MemoryStore();
-  return runSync(
-    createLeanValidator({ version, store, input, sink: options.sink, motion: options.motion ?? null, parent: options.parent ?? null }),
-    input,
-    store,
-    options.maxLineBytes ?? DEFAULT_MAX_LINE_BYTES,
-  );
-}
-
-function createLeanValidator({ version, store, input, sink, motion: pairedMotion, parent }) {
+export function validateLeanLog(text, { motion = null, parent = null } = {}) {
+  const version = detectSchemaVersion(text) ?? 1;
+  if (!SUPPORTED_VERSIONS.includes(version)) return unsupportedResult('lean', version);
   V = version;
-  const report = newReport(sink);
+  const report = newReport();
   const { add } = report;
-  const ctx = { store, input };
   const counters = { unknown: 0 };
-  const spaceOf = spaceGetter(store, 'lean');
+  const space = new Map();
+  const spaceOf = (source) => {
+    if (!space.has(source)) space.set(source, newSequenceSpace());
+    return space.get(source);
+  };
   const state = {
     lastBootId: null,
     started: false,
     policy: null,
-    calibrations: store.kv('calibrations'),
+    calibrations: new Map(),
     currentId: null,
-    estimates: store.kv('estimates'), // sequence -> {calibrationId, extremumEligible, leanAngleDeg, measurementMonotonicUs}
-    lastEstimateMeasurement: store.kv('lastEstimateMeasurement'), // boot -> us
-    lastMeasurementByBoot: store.kv('lastMeasurementByBoot'),
-    extremaBest: store.kv('extremaBest'), // `${calibrationId}|${side}` -> {sequence, peakAbsAngleDeg, eventMonotonicUs}
-    closed: store.kv('closed'),
-    eligibleCount: store.kv('eligibleCount'),
+    estimates: new Map(), // sequence -> record
+    lastEstimateMeasurement: new Map(), // boot -> us
+    lastMeasurementByBoot: new Map(),
+    extremaBest: new Map(), // `${calibrationId}|${side}` -> record
+    closed: new Set(),
+    eligibleCount: new Map(),
     replayable: false,
-    epochs: store.kv('epochs'), // filterEpoch -> {reason, initialInputs: {sourceId: sequence}}
+    epochs: new Map(), // filterEpoch -> {reason, initialInputs: Map(sourceId -> sequence)}
     currentEpoch: null,
     unavailable: false,
     resumeAfterEpoch: null,
-    strideReported: store.kv('strideReported'),
+    strideReported: new Set(),
     // v2
     runId: null,
     experimental: false,
     startedRecord: null,
-    afterCursor: store.kv('afterCursor'), // sourceId -> highest afterInputs sequence seen on hints / auto events
+    afterCursor: new Map(), // sourceId -> highest afterInputs sequence seen on hints / auto events
     auto: { current: null, resetSinceState: false, hintFirstSinceReset: null, hintLast: -1, sawState: false, violation: false, owed: null, owedReported: false },
     lastLine: 1,
   };
   let recordCount = 0;
   let eventCount = 0;
-  let motion = pairedMotion;
 
   if (motion && motion.version !== V) {
     add('SCHEMA_VERSION_MIXED', 1, `lean is schemaVersion ${V} but the motion log is schemaVersion ${motion.version}`);
     motion = null;
   }
 
-  return {
-    line(item) {
-      const record = parseRecord(item.raw, item.line, LEAN_RECORD_TYPES, add, counters);
-      if (record === null) return;
-      const { line } = item;
-      state.lastLine = line;
-      if (V === 2 && !checkRunId(state, record, line, add)) return;
-      if (record.recordType === 'lean_event') {
-        if (!checkLeanEvent(record, line, add)) return;
-        eventCount += 1;
-        applyLeanEvent(state, spaceOf, record, line, add, motion);
-        return;
-      }
-      if (!checkLeanRecord(record, line, add)) return;
-      recordCount += 1;
-      for (const flag of record.qualityFlags) {
-        if (!knownLeanFlags().has(flag)) add('UNKNOWN_QUALITY_FLAG', line, flag);
-      }
-      if (!state.started) {
-        add('MISSING_LEAN_STARTED', line, 'log does not open with lean_started');
-        state.started = true;
-      }
-      const first = applySequence(ctx, 'lean', spaceOf(record.sourceId), record, item, add, record.sourceId);
-      store.seqPut('lean', record.sourceId, record.sequence, first, null);
-      // A closing record describes the segment's own boot, which can be the
-      // previous one: it does not take part in boot tracking.
-      if (record.recordType !== 'lean_segment_closed') trackBoot(state, record, false, line, add);
-      switch (record.recordType) {
-        case 'lean_calibration':
-          applyCalibration(state, record, line, add);
-          break;
-        case 'lean_estimate':
-          applyEstimate(state, record, line, add, motion);
-          break;
-        case 'lean_extremum':
-          applyExtremum(state, record, line, add);
-          break;
-        case 'lean_hint':
-          applyHint(state, record, line, add, motion);
-          break;
-        default:
-          applySegmentClosed(state, record, line, add);
-      }
+  for (const { record, line } of records(text, LEAN_RECORD_TYPES, add, counters)) {
+    state.lastLine = line;
+    if (V === 2 && !checkRunId(state, record, line, add)) continue;
+    if (record.recordType === 'lean_event') {
+      if (!checkLeanEvent(record, line, add)) continue;
+      eventCount += 1;
+      applyLeanEvent(state, spaceOf, record, line, add, motion);
+      continue;
+    }
+    if (!checkLeanRecord(record, line, add)) continue;
+    recordCount += 1;
+    for (const flag of record.qualityFlags) {
+      if (!knownLeanFlags().has(flag)) add('UNKNOWN_QUALITY_FLAG', line, flag);
+    }
+    if (!state.started) {
+      add('MISSING_LEAN_STARTED', line, 'log does not open with lean_started');
+      state.started = true;
+    }
+    applySequence(spaceOf(record.sourceId), record, line, add, record.sourceId);
+    // A closing record describes the segment's own boot, which can be the
+    // previous one: it does not take part in boot tracking.
+    if (record.recordType !== 'lean_segment_closed') trackBoot(state, record, false, line, add);
+    switch (record.recordType) {
+      case 'lean_calibration':
+        applyCalibration(state, record, line, add);
+        break;
+      case 'lean_estimate':
+        applyEstimate(state, record, line, add, motion);
+        break;
+      case 'lean_extremum':
+        applyExtremum(state, record, line, add);
+        break;
+      case 'lean_hint':
+        applyHint(state, record, line, add, motion);
+        break;
+      default:
+        applySegmentClosed(state, record, line, add);
+    }
+  }
+  if (V === 2) finishLeanV2(state, add, motion, parent);
+
+  return finish(report, {
+    kind: 'lean',
+    version,
+    records: recordCount,
+    events: eventCount,
+    unknownRecords: counters.unknown,
+    pairedWithMotion: motion !== null,
+    crossFileChecks: {
+      motion: motion !== null ? 'run' : 'not_run',
+      parent: state.startedRecord?.derivesFrom ? (parent ? 'run' : 'not_run') : 'not_applicable',
     },
-    end() {
-      V = version;
-      if (V === 2) finishLeanV2(state, add, motion, parent);
-      return finish(report, {
-        kind: 'lean',
-        version,
-        records: recordCount,
-        events: eventCount,
-        unknownRecords: counters.unknown,
-        pairedWithMotion: motion !== null,
-        crossFileChecks: {
-          motion: motion !== null ? 'run' : 'not_run',
-          parent: state.startedRecord?.derivesFrom ? (parent ? 'run' : 'not_run') : 'not_applicable',
-        },
-      });
-    },
-  };
+  });
 }
 
 // v2: one lean file holds exactly one leanRunId, and every line carries it.
@@ -1034,25 +979,24 @@ function finishLeanV2(state, add, motion, parent) {
     // A qualified claim binds the whole file: every configured input must be declared available, and
     // identical to the configuration, in every motion session. Absence is a mismatch, never a skip.
     const reported = new Set();
-    const sessions = motion.model.store.sessionCount();
     for (const input of config.inputs) {
-      for (let session = 0; session < sessions && !reported.has(input.sourceId); session += 1) {
-        const decl = motion.model.store.sessionDecl(session, input.sourceId);
+      motion.model.sessions.forEach((decls, session) => {
+        const decl = decls.get(input.sourceId);
         const actual = decl?.available
           ? { sourceId: decl.sourceId, sensorType: decl.sensorType, inputPolicy: decl.inputPolicy ?? null, storageStride: decl.storageStride }
           : null;
-        if (actual === null || canonicalJson(actual) !== canonicalJson(input)) {
+        if ((actual === null || canonicalJson(actual) !== canonicalJson(input)) && !reported.has(input.sourceId)) {
           reported.add(input.sourceId);
           add('QUALIFIED_CONFIG_MISMATCH', state.startedRecord.line ?? 1, `qualifiedConfiguration input ${input.sourceId} is ${actual === null ? 'not declared available' : 'declared differently'} in motion session ${session}`);
         }
-      }
+      });
     }
   }
   const parentInfo = state.startedRecord?.derivesFrom;
   if (parentInfo && parent) {
-    // `parent` is a Buffer (library) or a path (CLI); a path is hashed in chunks.
-    const digest = prefixDigest(parent, parentInfo.parentByteLength);
-    if (digest.size < parentInfo.parentByteLength || digest.sha256 !== parentInfo.parentPrefixSha256) {
+    const prefix = parent.subarray(0, parentInfo.parentByteLength);
+    const sha = createHash('sha256').update(prefix).digest('hex');
+    if (parent.length < parentInfo.parentByteLength || sha !== parentInfo.parentPrefixSha256) {
       add('DERIVED_RUN_PARENT_MISMATCH', 1, 'parent prefix length or SHA-256 differs from derivesFrom');
     }
   }
@@ -1117,10 +1061,10 @@ function applyLeanEvent(state, spaceOf, record, line, add, motion) {
     if (record.filterEpoch !== expected) {
       add('ESTIMATOR_EPOCH_ORDER', line, `filterEpoch ${record.filterEpoch}, expected ${expected}`);
     } else {
-      // Later entries win, like the Map built from the same array did.
-      const initialInputs = {};
-      for (const i of record.initialInputs) initialInputs[`#${i.sourceId}`] = i.firstSequence;
-      state.epochs.set(record.filterEpoch, { reason: record.reason, initialInputs });
+      state.epochs.set(record.filterEpoch, {
+        reason: record.reason,
+        initialInputs: new Map(record.initialInputs.map((i) => [i.sourceId, i.firstSequence])),
+      });
       state.currentEpoch = record.filterEpoch;
     }
     if (V === 2 && motion && record.initialControlCursor > motion.model.maxControl) {
@@ -1366,15 +1310,7 @@ function applyCalibration(state, record, line, add) {
   if (record.supersedesCalibrationId !== null && state.calibrations.has(record.supersedesCalibrationId)) {
     state.calibrations.get(record.supersedesCalibrationId).supersededBy = record.calibrationId;
   }
-  state.calibrations.set(record.calibrationId, {
-    calibrationId: record.calibrationId,
-    deviceBootId: record.deviceBootId,
-    effectiveFromMonotonicUs: record.effectiveFromMonotonicUs,
-    leanAxisSource: record.leanAxisSource,
-    qualityFlags: record.qualityFlags,
-    invalidatedAt: null,
-    supersededBy: null,
-  });
+  state.calibrations.set(record.calibrationId, { ...record, invalidatedAt: null, supersededBy: null });
   state.currentId = record.calibrationId;
 }
 
@@ -1390,7 +1326,7 @@ function checkHintRange(state, record, line, add) {
 
 function applyEstimate(state, record, line, add, motion) {
   const measured = record.measurementMonotonicUs;
-  checkMonotonic(state.lastMeasurementByBoot, 'estimate', record.deviceBootId, measured, {
+  checkMonotonic(bootMap(state.lastMeasurementByBoot, 'estimate'), record.deviceBootId, measured, {
     add,
     line,
     code: 'MEASUREMENT_MONOTONIC_REGRESSION',
@@ -1465,12 +1401,7 @@ function applyEstimate(state, record, line, add, motion) {
     }
   }
 
-  state.estimates.set(record.sequence, {
-    calibrationId: record.calibrationId,
-    extremumEligible: record.extremumEligible,
-    leanAngleDeg: record.leanAngleDeg,
-    measurementMonotonicUs: record.measurementMonotonicUs,
-  });
+  state.estimates.set(record.sequence, record);
   if (motion) checkSourceRefs(record, line, add, motion, state);
 }
 
@@ -1479,8 +1410,9 @@ function checkSourceRefs(record, line, add, motion, state) {
   let newestSample = null;
   let spansBreak = false;
   for (const ref of record.sourceRefs) {
-    const first = motionSample(motion, ref.sourceId, ref.firstSequence);
-    const last = motionSample(motion, ref.sourceId, ref.lastSequence);
+    const samples = motion.model.sequences.get(ref.sourceId);
+    const first = samples?.get(ref.firstSequence);
+    const last = samples?.get(ref.lastSequence);
     // Only sequences the motion log actually holds can be referenced: an
     // estimate must never name an input whose raw append failed.
     if (ref.firstSequence > ref.lastSequence || !first || !last) {
@@ -1504,8 +1436,9 @@ function checkSourceRefs(record, line, add, motion, state) {
       newestSample = last;
     }
     newestInput = Math.max(newestInput, last.measurementUs);
-    if (motion.model.store.breakIn(ref.sourceId, record.deviceBootId, ref.firstSequence, ref.lastSequence)) spansBreak = true;
-    if (state.replayable && record.leanAngleDeg !== null) checkReplay(record, ref, line, add, motion, state, last.session);
+    const breaks = (motion.model.breaks.get(ref.sourceId) ?? []).filter((b) => b.boot === record.deviceBootId);
+    if (breaks.some((b) => ref.firstSequence < b.nextSeq && b.nextSeq <= ref.lastSequence)) spansBreak = true;
+    if (state.replayable && record.leanAngleDeg !== null) checkReplay(record, ref, samples, breaks, line, add, motion, state, last.session);
   }
   if (newestInput >= 0 && newestInput !== record.measurementMonotonicUs) {
     add('ESTIMATE_TIME_MISMATCH', line, `measurementMonotonicUs ${record.measurementMonotonicUs} != newest referenced input ${newestInput}`);
@@ -1524,12 +1457,8 @@ function checkSourceRefs(record, line, add, motion, state) {
 
 // Fusion has history: an estimate depends on every input since its epoch
 // boundary, not just on the newest referenced samples.
-function motionSample(motion, source, sequence) {
-  return motion.model.store.seqGet('motion', source, sequence)?.info;
-}
-
-function checkReplay(record, ref, line, add, motion, state, session) {
-  const initial = state.epochs.get(record.filterEpoch)?.initialInputs[`#${ref.sourceId}`];
+function checkReplay(record, ref, samples, breaks, line, add, motion, state, session) {
+  const initial = state.epochs.get(record.filterEpoch)?.initialInputs.get(ref.sourceId);
   if (initial === undefined) {
     add('REPLAY_INPUTS_INCOMPLETE', line, `epoch ${record.filterEpoch} declares no initial input for ${ref.sourceId}`);
     return;
@@ -1537,18 +1466,18 @@ function checkReplay(record, ref, line, add, motion, state, session) {
   if (ref.firstSequence < initial) {
     add('SOURCE_REF_BEFORE_EPOCH', line, `${ref.sourceId} ref starts at ${ref.firstSequence}, before epoch start ${initial}`);
   }
-  const start = motionSample(motion, ref.sourceId, initial);
+  const start = samples.get(initial);
   if (!start || start.boot !== record.deviceBootId) {
     add('REPLAY_INPUTS_INCOMPLETE', line, `${ref.sourceId} epoch start ${initial} is not stored in this boot`);
-  } else if (motion.model.store.breakIn(ref.sourceId, record.deviceBootId, initial, ref.lastSequence)) {
+  } else if (breaks.some((b) => initial < b.nextSeq && b.nextSeq <= ref.lastSequence)) {
     add('REPLAY_INPUTS_INCOMPLETE', line, `${ref.sourceId} has a gap, clock change or boot change inside epoch ${record.filterEpoch}`);
   }
   // V1-3: the stride is that of the session the referenced samples were written in,
   // reported at most once per (source, session).
-  const stride = motion.model.store.sessionDecl(session, ref.sourceId)?.storageStride ?? 1;
+  const stride = motion.model.sessions[session]?.get(ref.sourceId)?.storageStride ?? 1;
   const key = `${ref.sourceId}|${session}`;
   if (stride !== null && stride > 1 && !state.strideReported.has(key)) {
-    state.strideReported.set(key, true);
+    state.strideReported.add(key);
     add('REPLAY_STRIDE_DROPS_INPUTS', line, `${ref.sourceId} storageStride ${stride} (session ${session}) discards inputs the filter used, yet replayable is true`);
   }
 }
@@ -1592,7 +1521,7 @@ function applyExtremum(state, record, line, add) {
     add('EXTREMUM_DECREASED', line, `${record.side} peak ${record.peakAbsAngleDeg} < previous ${best.peakAbsAngleDeg} in ${record.calibrationId}`);
     return;
   }
-  state.extremaBest.set(key, { sequence: record.sequence, peakAbsAngleDeg: record.peakAbsAngleDeg, eventMonotonicUs: record.eventMonotonicUs });
+  state.extremaBest.set(key, record);
 }
 
 function applySegmentClosed(state, record, line, add) {
@@ -1605,7 +1534,7 @@ function applySegmentClosed(state, record, line, add) {
     add('SEGMENT_CLOSED_TWICE', line, record.calibrationId);
     return;
   }
-  state.closed.set(record.calibrationId, true);
+  state.closed.add(record.calibrationId);
   if (calibration.deviceBootId !== record.deviceBootId) {
     add('CALIBRATION_BOOT_MISMATCH', line, 'lean_segment_closed carries the segment boot, not the writing boot');
   }
@@ -1630,29 +1559,10 @@ function applySegmentClosed(state, record, line, add) {
   }
 }
 
-// ---------------------------------------------------------------- file API
+// ---------------------------------------------------------------- CLI
 
-// Validates one file. Lines are streamed; `index: 'disk'` keeps the index in an on-disk SQLite store
-// under `tmp` so memory does not grow with the input. Throws CapacityError / CancelledError.
-export async function validateFile(path, kind, { index = 'disk', tmp = null, motion = null, parent = null, sink = null, guard = new ResourceGuard(), maxLineBytes = DEFAULT_MAX_LINE_BYTES } = {}) {
-  const input = new FileInput(path);
-  try {
-    const version = detectSchemaVersion(input) ?? 1;
-    if (!SUPPORTED_VERSIONS.includes(version)) return { result: unsupportedResult(kind, version, sink ?? undefined), store: null };
-    const store = index === 'disk' ? new SqliteStore(join(tmp, `index-${process.hrtime.bigint()}.sqlite`)) : new MemoryStore();
-    const validator =
-      kind === 'motion'
-        ? createMotionValidator({ version, store, input, sink: sink ?? undefined })
-        : createLeanValidator({ version, store, input, sink: sink ?? undefined, motion, parent });
-    const result = await runAsync(validator, input, store, { maxLineBytes, guard });
-    return { result, store };
-  } finally {
-    input.close();
-  }
-}
-
-function detectKind(input) {
-  for (const { raw } of input.lines(Number.MAX_SAFE_INTEGER)) {
+function detectKind(text) {
+  for (const raw of text.split('\n')) {
     if (raw.trim() === '') continue;
     try {
       const type = JSON.parse(raw)?.recordType;
@@ -1665,289 +1575,60 @@ function detectKind(input) {
   return null;
 }
 
-// ---------------------------------------------------------------- CLI
-
-const USAGE =
-  'usage: validate-motion-lean.mjs [--json | --summary] [--findings-out <file.jsonl>] [--tmp-dir <dir>]\n' +
-  '         [--index auto|memory|disk] [--max-line-bytes <n>] [--rss-limit-mib <n>]\n' +
-  '         [--motion <motion.ndjson>] [--parent <old.lean.ndjson>] <file.ndjson> [...]\n';
-
-const TMP_PREFIX = 'roadscope-validate-';
-const OWNER_FILE = 'owner.json';
-const AUTO_DISK_BYTES = 16 * 1024 * 1024;
-const SUMMARY_FINDINGS = 100;
-
-function parseArgs(argv) {
-  const options = { json: false, summary: false, findingsOut: null, tmpDir: null, index: 'auto', maxLineBytes: DEFAULT_MAX_LINE_BYTES, rssLimitMiB: 240, motion: null, parent: null, files: [] };
-  const value = (i) => {
-    if (i >= argv.length) throw new Error(`${argv[i - 1]} needs a value`);
-    return argv[i];
-  };
+function main(argv) {
+  const asJson = argv.includes('--json');
+  let motionPath = null;
+  let parentPath = null;
+  const files = [];
   for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
-    if (arg === '--json') options.json = true;
-    else if (arg === '--summary') options.summary = true;
-    else if (arg === '--findings-out') options.findingsOut = value((i += 1));
-    else if (arg === '--tmp-dir') options.tmpDir = value((i += 1));
-    else if (arg === '--index') options.index = value((i += 1));
-    else if (arg === '--max-line-bytes') options.maxLineBytes = Number(value((i += 1)));
-    else if (arg === '--rss-limit-mib') options.rssLimitMiB = Number(value((i += 1)));
-    else if (arg === '--motion') options.motion = value((i += 1));
-    else if (arg === '--parent') options.parent = value((i += 1));
-    else if (arg.startsWith('--')) throw new Error(`unknown option ${arg}`);
-    else options.files.push(arg);
-  }
-  if (!['auto', 'memory', 'disk'].includes(options.index)) throw new Error('--index must be auto, memory or disk');
-  if (options.json && options.summary) throw new Error('--json and --summary are exclusive');
-  if (options.summary && !options.findingsOut) throw new Error('--summary needs --findings-out: the complete findings must go somewhere');
-  if (options.files.length === 0) throw new Error('no input file');
-  return options;
-}
-
-// Removes this user's temporary directories left by killed runs (SIGKILL cannot be cleaned up): only
-// directories with our owner marker, same uid and host, whose process no longer exists, older than an hour.
-function cleanStaleTemps(parent) {
-  const removed = [];
-  let entries = [];
-  try {
-    entries = readdirSync(parent);
-  } catch {
-    return removed;
-  }
-  for (const name of entries) {
-    if (!name.startsWith(TMP_PREFIX)) continue;
-    const dir = join(parent, name);
-    try {
-      const stat = statSync(dir);
-      if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) continue;
-      if (Date.now() - stat.mtimeMs < 3600_000) continue;
-      const owner = JSON.parse(readFileSync(join(dir, OWNER_FILE), 'utf8'));
-      if (owner.host !== hostname()) continue;
-      try {
-        process.kill(owner.pid, 0);
-        continue; // still running
-      } catch (error) {
-        if (error.code !== 'ESRCH') continue;
-      }
-      rmSync(dir, { recursive: true, force: true });
-      removed.push(dir);
-    } catch {
-      // not ours or unreadable: leave it
+    if (argv[i] === '--json') continue;
+    if (argv[i] === '--motion') {
+      motionPath = argv[(i += 1)];
+      continue;
     }
-  }
-  return removed;
-}
-
-function findingLine(f) {
-  return `  ${f.severity === ERROR ? 'E' : 'W'} line ${f.line} ${f.code}: ${f.detail}\n`;
-}
-
-// Buffered stdout with backpressure: a pipe that reads slowly must not make queued output pile up in
-// memory, and the process must not exit before it is drained (C1's process.exit() right after writing
-// truncated large outputs on pipes).
-function createOutput(stream) {
-  let buffer = '';
-  const flush = async () => {
-    if (buffer === '') return;
-    const ok = stream.write(buffer);
-    buffer = '';
-    if (!ok) await new Promise((done) => stream.once('drain', done));
-  };
-  return {
-    async write(text) {
-      buffer += text;
-      if (buffer.length >= 64 * 1024) await flush();
-    },
-    flush,
-  };
-}
-
-// Writes the --json output incrementally with exactly the layout of JSON.stringify(results, null, 2),
-// streaming each result's findings from its sink instead of holding them.
-class JsonWriter {
-  constructor(write) {
-    this.write = write;
-    this.count = 0;
-  }
-
-  async result(entry, findings) {
-    const marker = '__ROADSCOPE_FINDINGS_STREAMED_HERE__'; // plain ASCII: JSON.stringify keeps it verbatim
-    // `findings` keeps its position in `entry`; the placeholder is replaced by the streamed list.
-    const text = JSON.stringify({ ...entry, findings: marker }, null, 2).split('\n').map((l) => `  ${l}`).join('\n');
-    const [head, tail] = text.split(`"${marker}"`);
-    await this.write(this.count === 0 ? '[\n' : ',\n');
-    await this.write(head);
-    let any = false;
-    for (const finding of findings) {
-      await this.write(any ? ',\n' : '[\n');
-      await this.write(JSON.stringify(finding, null, 2).split('\n').map((l) => `      ${l}`).join('\n'));
-      any = true;
+    if (argv[i] === '--parent') {
+      parentPath = argv[(i += 1)];
+      continue;
     }
-    await this.write(any ? '\n    ]' : '[]');
-    await this.write(tail);
-    this.count += 1;
+    files.push(argv[i]);
   }
-
-  async end() {
-    await this.write(this.count === 0 ? '[]\n' : '\n]\n');
-  }
-}
-
-async function main(argv) {
-  let options;
-  try {
-    options = parseArgs(argv);
-  } catch (error) {
-    process.stderr.write(`${error.message}\n${USAGE}`);
+  if (files.length === 0) {
+    process.stderr.write('usage: validate-motion-lean.mjs [--json] [--motion <motion.ndjson>] [--parent <old.lean.ndjson>] <file.ndjson> [...]\n');
     return 2;
   }
+  const motion = motionPath ? validateMotionLog(readFileSync(motionPath, 'utf8')) : null;
+  const parent = parentPath ? readFileSync(parentPath) : null;
 
-  const guard = new ResourceGuard({ rssLimitBytes: options.rssLimitMiB > 0 ? options.rssLimitMiB * 2 ** 20 : 0 });
-  const onSignal = () => {
-    guard.cancelled = true;
-  };
-  process.on('SIGINT', onSignal);
-  process.on('SIGTERM', onSignal);
-
-  const output = createOutput(process.stdout);
-  const out = (text) => output.write(text);
-  const tmpParent = resolve(options.tmpDir ?? tmpdir());
-  let tmp = null;
-  const stores = [];
-  const sinks = [];
-  let findingsOut = null;
-  try {
-    const sizes = [options.motion, ...options.files].filter(Boolean).map((p) => statSync(p).size);
-    const total = sizes.reduce((a, b) => a + b, 0);
-    const index = options.index === 'auto' ? (total >= AUTO_DISK_BYTES ? 'disk' : 'memory') : options.index;
-
-    for (const dir of cleanStaleTemps(tmpParent)) process.stderr.write(`removed stale temporary directory ${dir}\n`);
-    tmp = mkdtempSync(join(tmpParent, TMP_PREFIX));
-    writeFileSync(join(tmp, OWNER_FILE), JSON.stringify({ pid: process.pid, host: hostname(), startedAt: new Date().toISOString() }), { mode: 0o600 });
-    guard.tmpDir = tmp;
-    if (index === 'disk') {
-      const fs = statfsSync(tmp);
-      const free = fs.bavail * fs.bsize;
-      const needed = Math.max(512 * 2 ** 20, total);
-      if (free < needed) throw new CapacityError('DISK_FULL', `${Math.round(free / 2 ** 20)} MiB free in ${tmpParent}; an index for ${Math.round(total / 2 ** 20)} MiB of input needs about ${Math.round(needed / 2 ** 20)} MiB`);
+  let failed = false;
+  let unsupported = false;
+  const results = [];
+  for (const file of files) {
+    const text = readFileSync(file, 'utf8');
+    const kind = detectKind(text);
+    if (kind === null) {
+      process.stderr.write(`${file}: no motion_* or lean_* record found\n`);
+      failed = true;
+      continue;
     }
-    if (options.findingsOut) findingsOut = new FileSink(options.findingsOut);
-
-    let motion = null;
-    if (options.motion) {
-      const sink = new FileSink(join(tmp, 'findings-motion.jsonl'));
-      sinks.push(sink);
-      const { result, store } = await validateFile(options.motion, 'motion', { index, tmp, sink, guard, maxLineBytes: options.maxLineBytes });
-      if (store) {
-        stores.push(store);
-        store.idle(); // kept for pairing; holds no cache while other files are validated
-      }
-      motion = { result, sink, path: resolve(options.motion) };
+    const { model, ...result } = kind === 'motion' ? validateMotionLog(text) : validateLeanLog(text, { motion, parent });
+    results.push({ file, ...result });
+    if (!result.ok) failed = true;
+    if (result.unsupported) unsupported = true;
+    if (asJson) continue;
+    const count = kind === 'motion' ? `${result.samples} samples` : `${result.records} records`;
+    process.stdout.write(
+      `${result.ok ? 'PASS' : 'FAIL'} ${file} [${kind}] - ${count}, ${result.events} events, ` +
+        `${result.errorCount} error(s), ${result.warnCount} warning(s)\n`,
+    );
+    for (const finding of result.findings) {
+      process.stdout.write(`  ${finding.severity === ERROR ? 'E' : 'W'} line ${finding.line} ${finding.code}: ${finding.detail}\n`);
     }
-
-    const json = options.json ? new JsonWriter(out) : null;
-    let failed = false;
-    let unsupported = false;
-    for (const [n, file] of options.files.entries()) {
-      const probe = new FileInput(file);
-      let kind;
-      try {
-        kind = detectKind(probe);
-      } finally {
-        probe.close();
-      }
-      if (kind === null) {
-        process.stderr.write(`${file}: no motion_* or lean_* record found\n`);
-        failed = true;
-        continue;
-      }
-      let sink;
-      let result;
-      if (motion && resolve(file) === motion.path) {
-        // The --motion file listed again: the same file, the same result; do not validate it twice.
-        ({ sink, result } = motion);
-      } else {
-        sink = new FileSink(join(tmp, `findings-${n}.jsonl`));
-        sinks.push(sink);
-        let store;
-        ({ result, store } = await validateFile(file, kind, { index, tmp, sink, guard, maxLineBytes: options.maxLineBytes, motion: kind === 'lean' ? motion?.result ?? null : null, parent: kind === 'lean' ? options.parent : null }));
-        // Only the --motion index outlives its file (later lean files are paired with it): close the rest
-        // now, so memory holds at most two indexes whatever the number of files.
-        if (store) store.close();
-        motion?.result.model?.store?.idle();
-      }
-      // Same keys, same order as the C1 output; findings are streamed in place.
-      const entry = { file };
-      for (const [key, v] of Object.entries(result)) if (key !== 'model' && key !== 'findingsFile') entry[key] = v;
-      if (!result.ok) failed = true;
-      if (result.unsupported) unsupported = true;
-
-      if (findingsOut) for (const f of sink.all()) findingsOut.push({ file, ...f });
-      if (json) {
-        await json.result(entry, sink.all());
-        continue;
-      }
-      const count = kind === 'motion' ? `${result.samples} samples` : `${result.records} records`;
-      await out(`${result.ok ? 'PASS' : 'FAIL'} ${file} [${kind}] - ${count}, ${result.events} events, ${result.errorCount} error(s), ${result.warnCount} warning(s)\n`);
-      let shown = 0;
-      for (const f of sink.all()) {
-        if (options.summary && shown >= SUMMARY_FINDINGS) {
-          await out(`  ... ${result.errorCount + result.warnCount - shown} more finding(s) in ${options.findingsOut}\n`);
-          break;
-        }
-        await out(findingLine(f));
-        shown += 1;
-      }
-    }
-    if (json) await json.end();
-    await output.flush();
-    if (findingsOut) findingsOut.close();
-    if (unsupported) return 4;
-    return failed ? 1 : 0;
-  } catch (error) {
-    if (error instanceof CancelledError) {
-      process.stderr.write('cancelled\n');
-      return 130;
-    }
-    if (error instanceof CapacityError) {
-      process.stderr.write(`CAPACITY ${error.code}: ${error.message} (validation did not complete; this is not a pass)\n`);
-      return 3;
-    }
-    const io = ['ENOSPC', 'EACCES', 'EPERM', 'EIO', 'EMFILE', 'ENOENT', 'EISDIR', 'SQLITE_FULL', 'SQLITE_IOERR', 'SQLITE_CANTOPEN', 'MODULE_NOT_FOUND', 'ERR_DLOPEN_FAILED'];
-    if (io.includes(error.code) || /SQLITE_FULL|SQLITE_IOERR|better-sqlite3/.test(String(error.message))) {
-      process.stderr.write(`IO ${error.code ?? 'ERROR'}: ${error.message} (validation did not complete; this is not a pass)\n`);
-      return 3;
-    }
-    throw error;
-  } finally {
-    for (const sink of sinks) sink.close();
-    if (findingsOut) findingsOut.close();
-    for (const store of stores) store.close();
-    if (tmp) {
-      try {
-        rmSync(tmp, { recursive: true, force: true });
-      } catch (error) {
-        process.stderr.write(`could not remove temporary directory ${tmp}: ${error.message}\n`);
-      }
-    }
-    if (process.env.ROADSCOPE_VALIDATOR_STATS) {
-      const usage = process.resourceUsage();
-      process.stderr.write(`STATS ${JSON.stringify({ maxRssKiB: usage.maxRSS, peakSampledRssBytes: guard.peakRss, userMs: Math.round(usage.userCPUTime / 1000), systemMs: Math.round(usage.systemCPUTime / 1000) })}\n`);
-    }
-    process.off('SIGINT', onSignal);
-    process.off('SIGTERM', onSignal);
   }
+  if (asJson) process.stdout.write(`${JSON.stringify(results, null, 2)}\n`);
+  if (unsupported) return 4;
+  return failed ? 1 : 0;
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
-  main(process.argv.slice(2)).then(
-    (code) => {
-      // Let stdout drain instead of process.exit(): nothing else keeps the process alive.
-      process.exitCode = code;
-    },
-    (error) => {
-      process.stderr.write(`${error.stack ?? error}\n`);
-      process.exit(3);
-    },
-  );
+  process.exit(main(process.argv.slice(2)));
 }

@@ -588,3 +588,29 @@ C1 的規範本文是 [`contracts/motion-lean/v2/README.md`](../../contracts/mot
 10. **C1 復核後修正（Codex `76bf403`）**：未來／過早 anchor 不再被略過（`SELECTION_SAMPLE_BEFORE_ANCHOR`），anchor 必須有待辦理由且不得倒退（`SELECTION_ANCHOR_UNJUSTIFIED`、`SELECTION_ANCHOR_REGRESSION`）；hint 消費處檢查 `estimator_state`（`HINT_WHILE_ESTIMATOR_UNAVAILABLE`），估算器中斷造成的 `disabled` 轉換為必存（`AUTO_STATE_TRANSITION_MISSING`），且轉換前須有 reset；資格配置的輸入集合須等於 `inputSources`，配對時每個 session 都須宣告且相同。新增錯誤碼 `INPUT_SOURCES_INVALID`。「估算器中斷時 pipeline 重設自動參考」是依 `LeanPipeline.kt` 的 `automatic.reset()` 推得，**請 Codex 在寫入端確認**。
 11. **C1-2 恢復路徑修正（Codex `a686727`）**：欠下的 `disabled(estimator_unavailable)` 改為只能由 reset＋該 disabled 清償的義務，後來的 `enabled`、錯誤 reason、估算器恢復都不再清除它；違規不可撤銷。義務跨過 `recording_resumed`／新 `lean_started`／檔案結尾時視為可能的崩潰截斷：警告 `AUTO_STATE_TRANSITION_UNSETTLED`，並令 `replayScope.calibration = true` 失敗。以 16 列狀態表 fixtures（`lean/*/14-owed-*`）覆蓋。Codex 已靜態確認 `LeanPipeline.interrupted()` 呼叫 `automatic.reset()`（非真機驗證）。
 
+## K. C2 實作對照（有界驗證器）
+
+C2 依 §E 實作，Codex 已接受的 C1 語義（345 項 fixtures 與四個 consumer 反例）不變。與 §E 的出入與實作決定：
+
+1. **單一規則、兩種索引後端。** 驗證規則只有一份；隨輸入成長的集合改經 `contracts/tools/lib/store.mjs`：`MemoryStore`（Map）與 `SqliteStore`（磁碟 SQLite，bounded write-back 快取，當前行用到的項目不會被逐出）。`test/run-differential.mjs` 以凍結的 C1 參考實作（`test/legacy/validate-motion-lean.36662fa.mjs`）為 oracle，所有 fixtures 在兩種後端下的結果與 findings 必須逐碼、逐行、逐字相同，CLI 的文字與 `--json` 輸出必須逐位元組相同。
+2. **duplicate／conflict**：索引存第一次出現的 canonical JSON 的 SHA-256 前 16 位元組與位元組位置；雜湊不同即 conflict，雜湊相同則回讀該行重新 canonical 比較。重複出現的序號，其索引資訊沿用 C1 語義由**最後一次**出現取代（因此長距離重寫舊樣本會連帶出現時間倒退與 cursor 不符，見大檔 `long-duplicate` profile）。
+3. **相依套件**：`better-sqlite3@13.0.3`（內含 SQLite 3.53.4），`package.json` exact 版本並鎖入 `package-lock.json`；只在磁碟索引時載入，載入失敗為 exit 3。未採用 Node 22 內建 `node:sqlite`（仍為實驗功能）。
+4. **CLI**：`--tmp-dir` 維持選用；`--json` 預設仍為完整輸出（串流寫出）；`--summary` 必須搭配 `--findings-out`。exit 3（容量／IO／環境）與 130（取消）適用任何版本，且不是 PASS。
+5. **發現並修正 C1 CLI 的缺陷**：C1 在 `process.stdout.write` 之後立即 `process.exit()`，stdout 是管線時大量 findings 會被截斷（實測 4 MB 合成檔的輸出只剩約 49 KB）。C2 的 CLI 對 stdout 做背壓並等排空才結束。差異測試因此以函式庫層比對大量 findings，CLI 比對限於每批 8 個小檔。
+6. **資源守衛在驗證迴圈內檢查**（同步迴圈不執行計時器）：每 4096 行檢查 RSS 與取消，每 64 MiB 輸入檢查暫存空間；非同步驅動每 4096 行讓出事件迴圈，使 SIGINT／SIGTERM 能被處理。
+7. **記憶體組成與控制**：V8 heap 的使用量穩定在約 20–70 MiB，但回收前的配置量會讓 RSS 擺動；最初的 2 GiB `clock-churn` 實測峰值 279 MiB（觸發 240 MiB 安全網而判為失敗，行為正確）。修正：(a) KV 快取原地更新、每行最多重排一次，熱門鍵不再每次配置新物件；(b) `--motion` 的索引在配對之外的時間閒置（快取寫回、清空、SQLite `shrink_memory`）；(c) 清單中的檔案就是 `--motion` 檔時沿用其結果，不重複驗證；(d) 其他檔案的索引驗證完即關閉。修正後同一 profile 峰值 202 MiB。SQLite 頁快取 8 MiB、KV 快取 20,000 項。
+8. **暫存需求**：啟動預檢 `max(512 MiB, 輸入總大小)`；實測暫存峰值約為輸入的 0.33–0.40 倍。
+9. **2 GiB 大檔驗收結果**（automated tests，合成資料，本機 Linux x86-64、Node 22.23.2、8 核；`test/run-large.mjs --bytes 2147483648`，每個 profile 為 motion 約 2.15 GB＋配對 lean 約 0.35 GB，以 `--index disk --motion M M L` 完整驗證；2026-10-08 20:28–20:40 UTC）：
+
+| profile | 結果 | 行數 | 峰值 RSS | 耗時 | 暫存峰值 | findings |
+|---|---|---|---|---|---|---|
+| valid | PASS（exit 0） | 5,876,857 | 198.6 MiB | 102 s | 835 MiB | 0 |
+| tail-corrupt | PASS（exit 1） | 5,876,857 | 186.5 MiB | 104 s | 837 MiB | `NOT_JSON` ×1 |
+| long-duplicate | PASS（exit 1） | 5,876,846 | 190.3 MiB | 103 s | 835 MiB | `SEQUENCE_DUPLICATE`、`SEQUENCE_CONFLICT`，及隨之的時間倒退與 cursor 不符各 1 |
+| session-churn | PASS（exit 0） | 5,848,321 | 192.1 MiB | 99 s | 820 MiB | 0 |
+| dangling-refs | PASS（exit 1） | 5,876,860 | 192.1 MiB | 101 s | 837 MiB | `SOURCE_REF_UNRESOLVED` ×3 |
+| clock-churn | PASS（exit 0） | 5,800,686 | 194.6 MiB | 158 s | 816 MiB | 0 |
+| many-findings | PASS（exit 1） | 5,791,713 | 189.3 MiB | 104 s | 1,001 MiB | 1,733,351 警告、173,336 error，完整寫入 `--findings-out` |
+
+   峰值 RSS 以子行程 `getrusage` 的 maxRSS 量得。所有 profile 都完整執行，沒有觸發安全網。小尺寸（4 MB）時另以 `--compare-reference` 確認 findings 與 C1 參考實作完全相同。前一輪量測中 `clock-churn` 觸發安全網（見第 7 項，已修正）；`many-findings` 那一輪的實際時間 30,702 秒而 CPU 僅 279 秒，判斷為量測期間機器休眠，本輪實際時間與 CPU 時間一致。**耗時與暫存只是這台機器的觀測，不是承諾**；CI runner 的數字以 `large` job 的報告為準，尚未在 GitHub 上執行。
+10. **未涵蓋**：Windows／macOS 上的 `better-sqlite3` 安裝與量測；CI runner 上的大檔執行；`--location`、`--qualification-registry`。`ajv@8.17.1`（PR #10 起即鎖定）有一則 moderate 等級的 ReDoS 公告（GHSA-2g4f-4pwh-qvx6），只在啟用 `$data` 選項時觸發；本工具未啟用該選項，C2 不改動 ajv 版本，升級另案處理。

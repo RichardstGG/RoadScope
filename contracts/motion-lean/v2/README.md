@@ -174,6 +174,20 @@ node contracts/tools/validate-motion-lean.mjs <motion.ndjson>
 node contracts/tools/validate-motion-lean.mjs [--motion <motion.ndjson>] [--parent <old.lean.ndjson>] <lean.ndjson>
 ```
 
-exit code：`0` 通過、`1` 有 error、`2` 用法、`4` 不支援的 `schemaVersion`。（容量／IO 的 exit 3 與取消的 130 屬 C2 的有界引擎。）目前的驗證器是**記憶體內的參考實作**；C2 的外存引擎必須在小檔上重現相同結果。
+**驗證器（C2）**：逐行串流讀取，不整檔讀入；所有隨輸入成長的索引（序號、session 宣告、校準、紀元、缺口區間等）放在同一套規則之下的兩種後端：小輸入用記憶體 Map，大輸入用磁碟上的 SQLite 索引（`better-sqlite3`，`package-lock.json` 鎖定 exact 版本）。兩種後端與 C1 參考實作（`contracts/tools/test/legacy/validate-motion-lean.36662fa.mjs`）在每個 fixture 上的 findings 必須逐碼、逐行、逐字相同（`test/run-differential.mjs`）。
+
+| 選項 | 說明 |
+|---|---|
+| `--json` | 與 C1 相同結構，完整輸出所有 findings；改為串流寫出，記憶體不隨 findings 數成長 |
+| `--summary --findings-out <file.jsonl>` | 文字輸出只列前 100 筆並指出完整清單所在；`--summary` 必須搭配 `--findings-out`，完整 findings 不會無處可查 |
+| `--findings-out <file.jsonl>` | 每筆 finding 一行 JSON（含 `file`） |
+| `--index auto\|memory\|disk` | 預設 `auto`：輸入合計 ≥ 16 MiB 用磁碟索引 |
+| `--tmp-dir <dir>` | 選用；預設在系統暫存目錄下 `mkdtemp`（權限 0700，內含 `owner.json` 標記）。成功、失敗、取消都會清除；SIGKILL 無法清除，下次執行只移除可確認屬於自己（同 uid、同主機、行程已不存在、逾 1 小時）的遺留目錄 |
+| `--max-line-bytes <n>` | 單行上限，預設 1 MiB；超過是容量失敗（exit 3），不是 finding |
+| `--rss-limit-mib <n>` | 常駐記憶體安全網，預設 240；觸發即 exit 3。**觸發不代表通過 256 MiB 目標** |
+
+exit code：`0` 通過、`1` 有 error、`2` 用法、`3` 容量／IO／執行環境（行過長、RSS 安全網、磁碟不足、索引無法建立；輸出「not a pass」）、`4` 不支援的 `schemaVersion`、`130` 取消。**exit 3 與 130 都表示驗證未完成，一律不是 PASS。** 輸出等 stdout 排空後才結束（C1 的 CLI 在管線輸出大量 findings 時會截斷，見 0003 §J）。
+
+**大檔驗收**：`node contracts/tools/test/run-large.mjs --bytes 2147483648 --dir <實體磁碟上的目錄>` 以固定種子串流產生 7 種合成 profile（合法、尾行損壞、長距離重複／衝突、session 策略輪替、dangling refs、反覆校時、極多 findings），各自以磁碟索引完整驗證並記錄峰值 RSS、耗時與暫存峰值。任一 profile 未完成、缺少或多出錯誤碼、或峰值 RSS 超過 256 MiB 即失敗。CI 每週與手動觸發時執行（`contracts.yml` 的 `large` job）。
 
 fixtures 位於 `testdata/contracts/motion-lean/v2/`，**由 `contracts/tools/test/build-v2-fixtures.mjs` 產生**（`npm test` 會檢查已提交檔案與產生器輸出完全一致）：`motion|lean/{valid,invalid}/`（`.expected` 必須出現的錯誤碼、`.absent` 必須不出現的碼、`.warnings`）、`pairs/{valid,invalid}/<案例>/{motion,lean}.ndjson`、`runs/{valid,invalid}/<案例>/{parent,lean}.ndjson`（`--parent`）。v1 的回歸案例在 `testdata/contracts/motion-lean/v1/regression/`，每案的舊工具（`7474933`）結果由實跑記錄於 `old-tool.json`，測試會重跑該凍結工具核對。

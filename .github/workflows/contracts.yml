@@ -13,6 +13,13 @@ on:
       - contracts/**
       - testdata/contracts/**
   workflow_dispatch:
+    inputs:
+      large:
+        description: 'Also run the 2 GiB capacity acceptance (about an hour)'
+        type: boolean
+        default: false
+  schedule:
+    - cron: '17 3 * * 1' # weekly capacity acceptance
 
 permissions:
   contents: read
@@ -63,3 +70,28 @@ jobs:
           node validate-motion-lean.mjs ../../testdata/contracts/motion-lean/v2/motion/invalid/02-unsupported-schema-version.ndjson
           test $? -eq 4
         working-directory: contracts/tools
+
+  # C2 capacity acceptance (0003 E.5): 2 GiB synthetic inputs per profile, peak RSS <= 256 MiB, every run
+  # completed. Not a per-PR gate (about an hour); weekly and on demand. A watchdog abort is a failure.
+  large:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.large)
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: contracts/tools/package-lock.json
+      - run: npm ci
+        working-directory: contracts/tools
+      - name: 2 GiB synthetic profiles
+        run: node test/run-large.mjs --bytes 2147483648 --dir "$RUNNER_TEMP/large" --clean-inputs | tee "$RUNNER_TEMP/large-report.txt"
+        working-directory: contracts/tools
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: large-validation-report
+          path: ${{ runner.temp }}/large-report.txt
+

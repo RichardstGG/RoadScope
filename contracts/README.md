@@ -20,7 +20,8 @@
 npm install --prefix contracts/tools
 npm test --prefix contracts/tools        # 對全部 fixtures 斷言預期行為
 node contracts/tools/validate-location-log.mjs [--json] <file.ndjson> [...]
-node contracts/tools/validate-motion-lean.mjs [--json] [--motion <motion.ndjson>] <file.ndjson> [...]
+node contracts/tools/validate-motion-lean.mjs [--json | --summary --findings-out <f>] [--index auto|memory|disk] [--tmp-dir <dir>] [--motion <motion.ndjson>] [--parent <old.lean.ndjson>] <file.ndjson> [...]
+node contracts/tools/test/run-large.mjs --bytes 2147483648 --dir <disk dir>   # 2 GiB 容量驗收（約一小時）
 ```
 
 fixtures 在 `testdata/contracts/`，與契約同版本（location-log 在 `location-log/v1/`，motion／lean 在 `motion-lean/v1/` 與 `motion-lean/v2/`）。v2 fixtures 由 `contracts/tools/test/build-v2-fixtures.mjs` 產生，`npm test` 檢查是否漂移。
