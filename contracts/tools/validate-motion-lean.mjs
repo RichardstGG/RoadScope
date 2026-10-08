@@ -35,6 +35,7 @@ const WARNINGS = new Set([
   'MOTION_TIME_GAP',
   'MEASUREMENT_RECEIVED_SKEW',
   'UNSETTLED_SELECTION_WINDOW',
+  'AUTO_STATE_TRANSITION_UNSETTLED',
 ]);
 // Everything not listed above is an error: timing/lean consumers cannot trust
 // the data. Warnings are the situations the contract tolerates on purpose, so
@@ -884,7 +885,7 @@ export function validateLeanLog(text, { motion = null, parent = null } = {}) {
     experimental: false,
     startedRecord: null,
     afterCursor: new Map(), // sourceId -> highest afterInputs sequence seen on hints / auto events
-    auto: { current: null, resetSinceState: false, hintFirstSinceReset: null, hintLast: -1, sawState: false, violation: false, owed: null },
+    auto: { current: null, resetSinceState: false, hintFirstSinceReset: null, hintLast: -1, sawState: false, violation: false, owed: null, owedReported: false },
     lastLine: 1,
   };
   let recordCount = 0;
@@ -967,7 +968,8 @@ function checkRunId(state, record, line, add) {
 function finishLeanV2(state, add, motion, parent) {
   const auto = state.auto;
   const scope = state.startedRecord?.replayScope;
-  if (scope?.calibration && (auto.violation || auto.owed || !auto.sawState || auto.current === null)) {
+  settleAtBoundary(state, add, state.lastLine, 'end of file');
+  if (scope?.calibration && (auto.violation || !auto.sawState || auto.current === null)) {
     add('CALIBRATION_REPLAY_STATE_INCOMPLETE', state.lastLine, 'replayScope.calibration is true but the auto_reference_state history is missing or inconsistent');
   }
   const config = state.startedRecord?.qualification?.qualifiedConfiguration;
@@ -1071,7 +1073,7 @@ function applyLeanEvent(state, spaceOf, record, line, add, motion) {
     if (record.state === 'unavailable') {
       state.unavailable = true;
       // The estimator interruption blocks the automatic reference: a transition to disabled is owed.
-      if (V === 2 && state.auto.current === 'enabled') state.auto.owed = 'estimator_unavailable';
+      if (V === 2 && state.auto.current === 'enabled' && !state.auto.owed) openObligation(state.auto, 'estimator_unavailable');
     } else if (state.unavailable) {
       // Coming back needs a fresh epoch: the fusion state did not survive.
       state.unavailable = false;
@@ -1082,8 +1084,8 @@ function applyLeanEvent(state, spaceOf, record, line, add, motion) {
     if (V === 2) {
       for (const [source, next] of Object.entries(record.resumedSequences)) spaceOf(source).expectedNext = next;
       if (record.eventType === 'recording_resumed') {
-        if (state.startedRecord?.replayScope?.calibration && (state.auto.current === null || state.auto.owed)) state.auto.violation = true;
-        state.auto.owed = null;
+        settleAtBoundary(state, add, line, 'recording_resumed');
+        if (state.startedRecord?.replayScope?.calibration && state.auto.current === null) state.auto.violation = true;
         state.auto.current = null; // the pipeline is rebuilt: the initial state must be stored again
         state.auto.resetSinceState = false;
       }
@@ -1104,8 +1106,10 @@ function applyLeanEvent(state, spaceOf, record, line, add, motion) {
 }
 
 function applyLeanStartedV2(state, record, line, add) {
+  settleAtBoundary(state, add, line, 'lean_started');
   state.startedRecord = { ...record, line };
-  state.auto = { current: null, resetSinceState: false, hintFirstSinceReset: null, hintLast: state.auto.hintLast, sawState: state.auto.sawState, violation: state.auto.violation, owed: null };
+  // violation is irrevocable: a new lean_started rebuilds the pipeline but does not repair the history before it.
+  state.auto = { current: null, resetSinceState: false, hintFirstSinceReset: null, hintLast: state.auto.hintLast, sawState: state.auto.sawState, violation: state.auto.violation, owed: null, owedReported: false };
   const ids = record.inputSources.map((i) => i.sourceId);
   if (new Set(ids).size !== ids.length) add('INPUT_SOURCES_INVALID', line, 'inputSources names a source more than once');
   if (record.replayable !== record.replayScope.estimate) {
@@ -1144,6 +1148,37 @@ function applyLeanStartedV2(state, record, line, add) {
 }
 
 // ---- automatic reference control (0003 D.1a)
+
+// Owed transitions. An estimator interruption while the automatic reference is enabled opens an
+// obligation that ONLY auto_reference_reset + auto_reference_state(disabled, <reason>) settles. A later
+// enabled, another state, another reason or a recovered estimator never clears it: "the condition is
+// over" is not "the control history is complete".
+function openObligation(auto, reason) {
+  auto.owed = reason;
+  auto.owedReported = false;
+}
+
+// Inside one pipeline, anything written while the obligation is open proves the transition was not stored.
+function reportObligation(state, add, line, detail) {
+  const auto = state.auto;
+  auto.violation = true;
+  if (!auto.owedReported) {
+    add('AUTO_STATE_TRANSITION_MISSING', line, detail);
+    auto.owedReported = true;
+  }
+}
+
+// A resume, a new lean_started or the end of the file may legitimately cut the writer off before it
+// stored the transition (a crash). The file stays valid data, but the gap is kept as an irrevocable
+// violation: the automatic reference's history cannot be replayed across it.
+function settleAtBoundary(state, add, line, boundary) {
+  const auto = state.auto;
+  if (!auto.owed) return;
+  auto.violation = true;
+  if (!auto.owedReported) add('AUTO_STATE_TRANSITION_UNSETTLED', line, `${boundary} while disabled(${auto.owed}) was still owed`);
+  auto.owed = null;
+  auto.owedReported = false;
+}
 
 function checkAfterInputs(state, record, line, add, motion) {
   for (const { sourceId, sequence } of record.afterInputs) {
@@ -1193,8 +1228,10 @@ function applyAutoState(state, record, line, add, motion) {
   if (record.state === 'disabled' && record.reason === 'estimator_unavailable' && !auto.resetSinceState) {
     fail('AUTO_RESET_MISSING', 'disabled(estimator_unavailable) must be preceded by auto_reference_reset');
   }
-  if (record.state !== 'enabled') auto.owed = null; // the owed transition is stored
-  else if (!state.unavailable) auto.owed = null;
+  if (auto.owed) {
+    if (record.state === 'disabled' && record.reason === auto.owed) auto.owed = null; // settled
+    else reportObligation(state, add, line, `auto_reference_state(${record.state}, ${record.reason}) while disabled(${auto.owed}) is owed: only reset + disabled(${auto.owed}) settles it`);
+  }
   auto.current = record.state;
   auto.resetSinceState = false;
   auto.sawState = true;
@@ -1208,10 +1245,7 @@ function applyHint(state, record, line, add, motion) {
     auto.violation = true;
     add('HINT_WHILE_ESTIMATOR_UNAVAILABLE', line, 'lean_hint while estimator_state is unavailable');
   }
-  if (auto.owed) {
-    auto.violation = true;
-    add('AUTO_STATE_TRANSITION_MISSING', line, `lean_hint after ${auto.owed} without the owed auto_reference_state transition`);
-  }
+  if (auto.owed) reportObligation(state, add, line, `lean_hint while disabled(${auto.owed}) is owed`);
   if (auto.current === null) {
     auto.violation = true;
     add('AUTO_STATE_MISSING', line, 'lean_hint before any auto_reference_state since lean_started / recording_resumed');

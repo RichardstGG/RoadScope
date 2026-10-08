@@ -146,7 +146,10 @@ v1 的歷史修正（V1-1～V1-5）見 [`../v1/README.md`](../v1/README.md) 末�
 **`auto_reference_state`**：`{state: enabled | suspended | disabled, reason, afterInputs}`。
 
 1. **初始狀態必記**：每個 `lean_started` 與每個 `recording_resumed` 之後，在第一筆 `lean_hint` 之前必須有一筆（`AUTO_STATE_MISSING`）。
-2. **所有有效的 `enabled`／`suspended`／`disabled` 轉換均保存**（包含估算器不可用造成的轉換：`estimator_state(unavailable)` 發生在 `enabled` 期間，必須接著儲存 `disabled(estimator_unavailable)`，缺 → 下一筆 hint 報 `AUTO_STATE_TRANSITION_MISSING`；估算器中斷會重設融合狀態，因此轉換前須有 `auto_reference_reset`，缺 → `AUTO_RESET_MISSING`）；唯一可省略的是可由版本化演算法與完整輸入重算的內部條件（`pendingAutomatic`、紀元起點後一秒、候選容量飽和、`delivered`）。`enabled` 是必要而非充分條件：`updateFix`／`add` 仍分別套用演算法的呼叫條件。
+2. **所有有效的 `enabled`／`suspended`／`disabled` 轉換均保存。** 估算器不可用造成的轉換是**欠下的義務**：`estimator_state(unavailable)` 發生在 `enabled` 期間，就欠一組 `auto_reference_reset` ＋ `auto_reference_state(disabled, estimator_unavailable)`（估算器中斷會重設融合狀態，`LeanPipeline.interrupted()` 呼叫 `automatic.reset()`；缺 reset → `AUTO_RESET_MISSING`）。
+   - **只有這組 `disabled(estimator_unavailable)` 能清償。** 之後的 `enabled`、其他 state、其他 reason，或估算器恢復可用，都**不會**清除它：「條件已恢復」不等於「控制歷史完整」。清償前出現任何 `auto_reference_state`（非正確的 disabled）或 `lean_hint` → `AUTO_STATE_TRANSITION_MISSING`（每個義務報一次），且違規**不可撤銷**：之後補上正確事件也不會恢復 `replayScope.calibration` 的資格。
+   - 義務未清償就遇到 `recording_resumed`、新的 `lean_started` 或檔案結尾：這可能是寫入端在保存前被終止（崩潰），檔案仍是有效資料，報**警告** `AUTO_STATE_TRANSITION_UNSETTLED`；但缺口照樣不可撤銷地記為違規，宣告 `replayScope.calibration = true` 時報 `CALIBRATION_REPLAY_STATE_INCOMPLETE`。新的 `lean_started` 重建 pipeline，但不修復它之前的歷史。
+   - `suspended` 或 `disabled` 期間發生 unavailable 不欠任何轉換。；唯一可省略的是可由版本化演算法與完整輸入重算的內部條件（`pendingAutomatic`、紀元起點後一秒、候選容量飽和、`delivered`）。`enabled` 是必要而非充分條件：`updateFix`／`add` 仍分別套用演算法的呼叫條件。
 3. **hint 的消費處會檢查檔內已知的可用性**：`estimator_state` 為 `unavailable` 期間出現 `lean_hint` → `HINT_WHILE_ESTIMATOR_UNAVAILABLE`，不因較早的 `enabled` 而接受。這類違規同樣令 `replayScope.calibration = true` 的宣告失敗。
 3. `suspended` ＝ 外部（使用者手動指令）暫停；`disabled` ＝ 條件不成立（現行校準存在、估算不可用、實驗輸入）。`suspended` 與 `disabled` 期間不得出現 `lean_hint`（`HINT_WHILE_NOT_ENABLED`）；現行校準存在期間不得出現 `lean_hint`（`HINT_WHILE_CALIBRATED`）。
 4. **與 reset 的次序**（同一個 `afterInputs` 邊界內依檔案順序處理）：進入手動指令：先 `auto_reference_reset` 再 `suspended`（缺 reset → `AUTO_RESET_MISSING`）。離開 `suspended`：先 reset 再記**取消後的實際狀態**（缺 reset → `AUTO_RESUME_WITHOUT_RESET`）。`cancel` **只解除手動暫停**：若現行校準或估算不可用等條件仍成立，必須記 `disabled`，不得記 `enabled`（`AUTO_ENABLED_WHILE_BLOCKED`；驗證器只能檢查「現行校準」與「估算不可用」，`experimental` 輸入在檔案中沒有可核對的來源）。
@@ -158,7 +161,7 @@ v1 的歷史修正（V1-1～V1-5）見 [`../v1/README.md`](../v1/README.md) 末�
 
 ## 9. 新增與變更的錯誤碼
 
-warning：`UNSETTLED_SELECTION_WINDOW`。
+warning：`UNSETTLED_SELECTION_WINDOW`、`AUTO_STATE_TRANSITION_UNSETTLED`。
 
 error（新增）：`UNSUPPORTED_SCHEMA_VERSION`、`SCHEMA_VERSION_MIXED`、`STRIDE_POLICY_CONFLICT`、`POLICY_REDECLARED`、`SELECTION_WITHOUT_POLICY`、`SELECTION_ANCHOR_MISSING`、`ANCHOR_TIMEBASE_MISMATCH`、`SELECTION_BUCKET_VIOLATION`、`SELECTION_STATS_MISMATCH`、`ACCURACY_STATE_CHAIN`、`ACCURACY_CHANGE_UNRECORDED`、`CONTROL_SEQUENCE_GAP`、`CONTROL_SEQUENCE_REGRESSION`、`CONTROL_CURSOR_AHEAD`、`CONTROL_CURSOR_MISMATCH`、`SOURCE_REF_SPANS_SESSIONS`、`RUN_ID_MISMATCH`、`DERIVED_RUN_PARENT_MISMATCH`、`REPLAY_SCOPE_MISMATCH`、`REFILTER_SPEC_UNRESOLVABLE`、`EXPERIMENTAL_ESTIMATE_UNFLAGGED`、`EXTREMUM_IN_EXPERIMENTAL_RUN`、`QUALIFIED_WITHOUT_REF`、`QUALIFICATION_FINGERPRINT_MISMATCH`、`QUALIFIED_CONFIG_MISMATCH`、`ESTIMATE_CALIBRATION_TAINT_DROPPED`、`CARRIED_OVER_TAINT_DROPPED`、`SELECTION_SAMPLE_BEFORE_ANCHOR`、`SELECTION_ANCHOR_UNJUSTIFIED`、`SELECTION_ANCHOR_REGRESSION`、`HINT_WHILE_ESTIMATOR_UNAVAILABLE`、`AUTO_STATE_TRANSITION_MISSING`、`INPUT_SOURCES_INVALID`、`AUTO_STATE_MISSING`、`AUTO_RESET_MISSING`、`AUTO_RESUME_WITHOUT_RESET`、`AUTO_ENABLED_WHILE_BLOCKED`、`HINT_WHILE_NOT_ENABLED`、`HINT_WHILE_CALIBRATED`、`HINT_CURSOR_REGRESSION`、`HINT_CURSOR_AHEAD`、`HINT_RANGE_INCOMPLETE`、`HINT_AFTER_CALIBRATION`、`CALIBRATION_REPLAY_STATE_INCOMPLETE`。其餘沿用 v1 §13。
 

@@ -738,7 +738,7 @@ function experimentalBase(o = {}) {
   enabledWhile.estimatorState('unavailable', 'input_interrupted');
   enabledWhile.autoReset('epoch_reset', []);
   enabledWhile.autoState('enabled', 'estimator_available', []); // still unavailable
-  leanCase('invalid', '13e-enabled-while-estimator-unavailable', enabledWhile, { expected: ['AUTO_ENABLED_WHILE_BLOCKED'] });
+  leanCase('invalid', '13e-enabled-while-estimator-unavailable', enabledWhile, { expected: ['AUTO_ENABLED_WHILE_BLOCKED', 'AUTO_STATE_TRANSITION_MISSING'] });
   const eof = new LeanLog();
   eof.started({ replayScope: { estimate: false, calibration: true, refilter: false } });
   eof.reset();
@@ -782,6 +782,63 @@ function experimentalBase(o = {}) {
   log.edit(log.lines.length - 1, () => {});
   log.event('estimator_state', { state: 'available', reason: null }, { lastSequences: { 'lean-estimator': 50 } });
   leanCase('invalid', '12-event-last-sequence-ahead', log, { expected: ['EVENT_SEQUENCE_AHEAD'] });
+}
+
+// ------------------------------------------------------------ owed-transition state table (C1-2)
+// An estimator interruption while the automatic reference is enabled owes reset + disabled(estimator_unavailable).
+// Only that pair settles it. "The estimator is available again" is not "the control history is complete".
+// Steps: Ei/Ea/Er enabled(initial|estimator_available|recovery); Ec enabled(manual_command_cancelled);
+//   U estimator unavailable; A estimator available + new epoch; R auto_reference_reset;
+//   D disabled(estimator_unavailable); Dx disabled(calibration_present) (a wrong reason);
+//   S suspended(manual_command_started); H hint; RES recording_resumed + recovery epoch; LS a new lean_started.
+const OWED_TABLE = [
+  // name, calibration replay claimed, steps, outcome, expected (errors | warnings), absent
+  ['01-normal-interruption-and-recovery', true, 'Ei H U R D A Ea H', 'valid'],
+  ['02-recovery-enabled-without-reset-or-disabled', true, 'Ei U A Ea H', 'invalid', ['AUTO_STATE_TRANSITION_MISSING', 'CALIBRATION_REPLAY_STATE_INCOMPLETE']],
+  ['03-reset-only-then-recovery', true, 'Ei U R A Ea H', 'invalid', ['AUTO_STATE_TRANSITION_MISSING', 'CALIBRATION_REPLAY_STATE_INCOMPLETE']],
+  ['04-enabled-while-still-unavailable', false, 'Ei U R Ea', 'invalid', ['AUTO_ENABLED_WHILE_BLOCKED', 'AUTO_STATE_TRANSITION_MISSING']],
+  ['05-disabled-with-wrong-reason', true, 'Ei U R Dx A R Ea H', 'invalid', ['AUTO_STATE_TRANSITION_MISSING', 'CALIBRATION_REPLAY_STATE_INCOMPLETE']],
+  ['06-suspended-instead-of-disabled', false, 'Ei U R S', 'invalid', ['AUTO_STATE_TRANSITION_MISSING']],
+  ['07-wrong-then-correct-stays-violated', true, 'Ei U R Dx R D A Ea H', 'invalid', ['AUTO_STATE_TRANSITION_MISSING', 'CALIBRATION_REPLAY_STATE_INCOMPLETE']],
+  ['08-disabled-without-reset', false, 'Ei U D A Ea H', 'invalid', ['AUTO_RESET_MISSING'], ['AUTO_STATE_TRANSITION_MISSING']],
+  ['09-second-interruption-not-stored', false, 'Ei U R D A Ea H U A Ea H', 'invalid', ['AUTO_STATE_TRANSITION_MISSING']],
+  ['10-resume-before-transition-no-replay-claim', false, 'Ei U RES A Er H', 'valid', ['AUTO_STATE_TRANSITION_UNSETTLED']],
+  ['11-resume-before-transition-replay-claimed', true, 'Ei U RES A Er H', 'invalid', ['CALIBRATION_REPLAY_STATE_INCOMPLETE'], ['AUTO_STATE_TRANSITION_MISSING']],
+  ['12-new-lean-started-no-replay-claim', false, 'Ei U LS A Ei H', 'valid', ['AUTO_STATE_TRANSITION_UNSETTLED']],
+  ['13-new-lean-started-replay-claimed', true, 'Ei U LS A Ei H', 'invalid', ['CALIBRATION_REPLAY_STATE_INCOMPLETE']],
+  ['14-end-of-file-no-replay-claim', false, 'Ei H U', 'valid', ['AUTO_STATE_TRANSITION_UNSETTLED']],
+  ['15-end-of-file-replay-claimed', true, 'Ei H U', 'invalid', ['CALIBRATION_REPLAY_STATE_INCOMPLETE']],
+  ['16-unavailable-while-suspended-owes-nothing', true, 'Ei R S U A R Ec H', 'valid'],
+];
+for (const [name, claimed, steps, outcome, codes = [], absent = []] of OWED_TABLE) {
+  const scope = { estimate: false, calibration: claimed, refilter: false };
+  const log = new LeanLog();
+  log.started({ replayScope: scope });
+  log.reset();
+  let hint = 0;
+  for (const step of steps.split(' ')) {
+    const at = [{ sourceId: ACC, sequence: hint }];
+    switch (step) {
+      case 'Ei': log.autoState('enabled', 'initial', at); break;
+      case 'Ea': log.autoState('enabled', 'estimator_available', at); break;
+      case 'Er': log.autoState('enabled', 'recovery', at); break;
+      case 'Ec': log.autoState('enabled', 'manual_command_cancelled', at); break;
+      case 'U': log.estimatorState('unavailable', 'input_interrupted'); break;
+      case 'A': log.estimatorState('available'); log.reset([{ sourceId: ACC, firstSequence: hint }], { reason: 'input_clock_state_change' }); break;
+      case 'R': log.autoReset('epoch_reset', at); break;
+      case 'D': log.autoState('disabled', 'estimator_unavailable', at); break;
+      case 'Dx': log.autoState('disabled', 'calibration_present', at); break;
+      case 'S': log.autoState('suspended', 'manual_command_started', at); break;
+      case 'H': log.hint({ i: hint }); hint += 1; break;
+      case 'RES': log.resumed('process_restart', { resumedSequences: { 'lean-estimator': 0, 'lean-hint': hint } }); log.reset([{ sourceId: ACC, firstSequence: hint }], { reason: 'recovery' }); break;
+      case 'LS': log.started({ replayScope: scope }); break;
+      default: throw new Error(`unknown step ${step}`);
+    }
+  }
+  if (!log.lines.some((l) => !l.includes('"lean_event"'))) log.calibration('cal-anchor', { from: T0 + 9_000_000 }); // keep a data record
+  const label = `14-owed-${name}`;
+  if (outcome === 'valid') leanCase('valid', label, log, codes.length ? { warnings: codes } : {});
+  else leanCase('invalid', label, log, { expected: codes, ...(absent.length ? { absent } : {}) });
 }
 
 // ------------------------------------------------------------ pairs
