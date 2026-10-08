@@ -1,5 +1,40 @@
 # 第 2 階段契約修訂復核 F2
 
+## 最終復核：8832561（2026-10-08）
+
+已核對 PR #10 `8832561aa5b1e5302c2d702eebc0b3eca733cb4c`：僅設計文件 +111／−21。
+**Codex 第 2 階段設計審查完成，接受三項修訂方向；C1 須落實以下明確條件。**
+這是附實作驗收條件的可實作性接受，不是共同 schema 已生效、PR 核准或產品驗收通過。
+下方原始 F2 保留歷史，待辦狀態以本節為準。無須再開一輪完整 A～E 設計。
+
+1. **控制狀態**：reason 清單足以表達目前外部操作；先 reset 再記狀態可實作。
+   但 D.1a 第 2 點「每次變更必記」與第 5 點「可省略」需在 C1 消除歧義。
+   Codex 採明確方案：所有 enabled／suspended／disabled 的有效狀態轉換均保存；
+   可重算而省略的是 pendingAutomatic／epoch 等內部條件，不省略有效狀態轉換。
+   enabled 是必要而非充分條件，updateFix 與 add 仍分別套用版本化演算法的呼叫條件。
+   cancel 只解除手動暫停，不能抹掉既存 calibration／mount、不可用或 experimental 條件；
+   仍受阻時必須記 disabled，不能無條件寫 enabled。初始狀態須在首次候選處理／hint 前存在。
+   每次實際 reset 都需保存，即使 upright→left 等操作前後同為 suspended，亦不能被狀態去重丟掉。
+   C1 fixtures／後續 Kotlin replay 應涵蓋取消時仍受阻、暫停中再 reset、相同邊界事件順序。
+   若這些條件缺失，calibration=true 不得驗收。這些是既有 F2 完整控制歷史要求的落實。
+2. **錯誤碼**：接受 stride≥2 為 SCHEMA_INVALID；型別合法但 policy 組合矛盾才為
+   STRIDE_POLICY_CONFLICT。C1 同步修正 B.5 表格及「其餘一律」文字，與 I-05 一致。
+   available=false 不具 stride／policy 的既有來源分支保留。
+3. **相容回歸**：R-01／R-02a～c 的舊工具推導與 7474933 原始碼一致，接受以實跑碼與
+   行號建立 .old-tool 基準；目前仍是 static validation。V1-4／V1-5 與 CLI 影響已補齊。
+   私有檔污染傳遞驗證仍 untested，待 C2；不回頭改寫歷史檔。
+
+驗證：原始碼／提交差異 static validation；本輪只改審查文件，未跑產品 automated／mock tests，
+未執行 manual／hardware tests。修改前 PR #11 ffdb350 的 Android／iOS CI 均成功。
+沒有實作新 schema、callback 測試、完整 replay、容量或精度驗證。
+
+下一階段按 D1 從 **S1 停止完成協定、關閉後匯出與即時摘要**開始；本輪在設計審查完成後停止。
+C1 由契約主筆依上述條件形成唯一規範與 fixtures，接受條件須在 C1 review 核對，
+不由手機端另造契約。S2／S4／S5 仍受相應契約與驗證依賴約束。
+PR #2 仍未完成：可靠性實作、最新版本真機驗收與正式交接門檻均未被本次設計審查取代。
+
+---
+
 日期：2026-10-08。契約 PR #10 `62b9bfffa06871094331ba55caf8d07076d99b33`，
 手機 PR #11 `13b68a3`，runtime `63e1b91`。
 本文件復核 `docs/decisions/0003-motion-lean-reliability-r2.md`；取代 F1 的待辦狀態，
