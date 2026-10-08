@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.roadscope.invalid/motion-lean/v2/common.schema.json",
+  "title": "Shared definitions of the motion and lean logs, schemaVersion 2",
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "utcTimestamp": {
+      "type": "string",
+      "description": "RFC3339 with a literal Z offset. Local-offset forms are rejected so that no consumer has to normalise.",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"
+    },
+    "qualityFlag": {
+      "type": "string",
+      "description": "Unknown flags are tolerated and must be preserved, never dropped and never treated as valid.",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "qualityFlags": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/qualityFlag"
+      },
+      "uniqueItems": true
+    },
+    "monotonicUs": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Native monotonic time including device sleep, microseconds. Comparable only inside one deviceBootId."
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "unitVector3": {
+      "type": "object",
+      "description": "Vector expected to have length 1 (checked by the validator, tolerance 1e-3).",
+      "properties": {
+        "x": {
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1
+        },
+        "y": {
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1
+        },
+        "z": {
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "z"
+      ],
+      "additionalProperties": false
+    },
+    "monotonicRange": {
+      "type": "object",
+      "properties": {
+        "fromMonotonicUs": {
+          "$ref": "#/$defs/monotonicUs"
+        },
+        "toMonotonicUs": {
+          "$ref": "#/$defs/monotonicUs"
+        }
+      },
+      "required": [
+        "fromMonotonicUs",
+        "toMonotonicUs"
+      ],
+      "additionalProperties": false
+    },
+    "platform": {
+      "enum": [
+        "android",
+        "ios"
+      ]
+    },
+    "resumeReason": {
+      "enum": [
+        "crash",
+        "process_restart",
+        "boot"
+      ]
+    },
+    "accuracyState": {
+      "enum": [
+        "unobserved",
+        "unavailable",
+        "unreliable",
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "sha256Hex": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "afterInputs": {
+      "type": "array",
+      "description": "Per input source, the last sequence the consumer had consumed at this boundary. Defines the order between lean records and the inputs.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "sourceId": {
+            "$ref": "common.schema.json#/$defs/nonEmptyString"
+          },
+          "sequence": {
+            "$ref": "common.schema.json#/$defs/sequence"
+          }
+        },
+        "required": [
+          "sourceId",
+          "sequence"
+        ],
+        "additionalProperties": false
+      }
+    }
+  }
+}

@@ -1,18 +1,24 @@
 #!/usr/bin/env node
 // Validates the raw motion log and the derived lean log against
-// contracts/motion-lean/v1. The schemas cover one record; this tool adds the
+// contracts/motion-lean/v1 and v2 (the version is read from the file; a file
+// holds exactly one version). The schemas cover one record; this tool adds the
 // cross-line rules a schema cannot express: sequence continuity, monotonic
 // direction, clock-map references, calibration segmentation and extrema.
-// Usage: node validate-motion-lean.mjs [--json] [--motion <motion.ndjson>] <file.ndjson> [...]
+// Usage: node validate-motion-lean.mjs [--json] [--motion <motion.ndjson>] [--parent <old.lean.ndjson>] <file.ndjson> [...]
 // A lean file is checked against a motion file only when --motion is given.
+// Exit codes: 0 pass, 1 errors, 2 usage, 4 unsupported schemaVersion.
+// This is the in-memory reference implementation (C1). The bounded, disk-indexed
+// engine (C2) must reproduce its results on small inputs.
 
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import Ajv2020 from 'ajv/dist/2020.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const schemaDir = resolve(here, '../motion-lean/v1');
+const SUPPORTED_VERSIONS = [1, 2];
+let V = 1; // schemaVersion of the file being validated (set per validate call)
 
 const ERROR = 'error';
 const WARN = 'warn';
@@ -28,6 +34,7 @@ const WARNINGS = new Set([
   'MISSING_LEAN_STARTED',
   'MOTION_TIME_GAP',
   'MEASUREMENT_RECEIVED_SKEW',
+  'UNSETTLED_SELECTION_WINDOW',
 ]);
 // Everything not listed above is an error: timing/lean consumers cannot trust
 // the data. Warnings are the situations the contract tolerates on purpose, so
@@ -40,7 +47,7 @@ export const KNOWN_MOTION_FLAGS = new Set([
   'clock_map_unavailable',
   'synthetic',
 ]);
-export const KNOWN_LEAN_FLAGS = new Set([
+const LEAN_FLAGS_V1 = [
   'lean_unavailable',
   'no_valid_calibration',
   'lean_axis_unknown',
@@ -50,16 +57,32 @@ export const KNOWN_LEAN_FLAGS = new Set([
   'carried_over_unverified',
   'clock_map_unavailable',
   'synthetic',
-]);
+  // V1-1: known since the reliability amendment (0003 A.3).
+  'sensor_accuracy_unreliable',
+  'calibration_input_unverified',
+];
+// v2 only (0003 B.4, D.4): unknown platform accuracy, unqualified algorithm.
+const LEAN_FLAGS_V2_ONLY = ['sensor_accuracy_unknown', 'algorithm_unqualified'];
 // An estimate carrying any of these cannot be extremum-eligible.
-export const BLOCKING_LEAN_FLAGS = new Set([
+const BLOCKING_V1 = [
   'lean_unavailable',
   'no_valid_calibration',
   'lean_axis_unknown',
   'input_gap',
   'after_input_gap',
   'dynamic_acceleration_high',
-]);
+  'sensor_accuracy_unreliable', // V1-2
+  'calibration_input_unverified',
+];
+// Calibration taint (V1-4, V1-5): a calibration carrying one of these taints every estimate using it.
+const TAINT_V1 = ['sensor_accuracy_unreliable', 'calibration_input_unverified'];
+export const KNOWN_LEAN_FLAGS = new Set(LEAN_FLAGS_V1);
+export const KNOWN_LEAN_FLAGS_V2 = new Set([...LEAN_FLAGS_V1, ...LEAN_FLAGS_V2_ONLY]);
+export const BLOCKING_LEAN_FLAGS = new Set(BLOCKING_V1);
+export const BLOCKING_LEAN_FLAGS_V2 = new Set([...BLOCKING_V1, ...LEAN_FLAGS_V2_ONLY]);
+const knownLeanFlags = () => (V === 2 ? KNOWN_LEAN_FLAGS_V2 : KNOWN_LEAN_FLAGS);
+const blockingLeanFlags = () => (V === 2 ? BLOCKING_LEAN_FLAGS_V2 : BLOCKING_LEAN_FLAGS);
+const taintFlags = () => (V === 2 ? new Set([...TAINT_V1, 'sensor_accuracy_unknown']) : new Set(TAINT_V1));
 // Any other leanAxisSource value (including a newer writer's) means "axis unknown".
 const USABLE_AXIS_SOURCES = new Set(['manual_left_lean', 'inherited_from_previous']);
 
@@ -70,6 +93,7 @@ const LEAN_RECORD_TYPES = new Set([
   'lean_extremum',
   'lean_segment_closed',
   'lean_event',
+  'lean_hint',
 ]);
 
 const SAMPLE_DEFS = {
@@ -86,6 +110,11 @@ const MOTION_EVENT_DEFS = {
   log_truncated: 'eventLogTruncated',
   recording_resumed: 'eventRecordingResumed',
 };
+const MOTION_EVENT_DEFS_V2 = {
+  selection_anchor: 'eventSelectionAnchor',
+  selection_stats: 'eventSelectionStats',
+  source_accuracy_state: 'eventSourceAccuracyState',
+};
 const LEAN_EVENT_DEFS = {
   lean_started: 'eventLeanStarted',
   calibration_invalidated: 'eventCalibrationInvalidated',
@@ -96,11 +125,16 @@ const LEAN_EVENT_DEFS = {
   log_truncated: 'eventLogTruncated',
   recording_resumed: 'eventRecordingResumed',
 };
+const LEAN_EVENT_DEFS_V2 = {
+  auto_reference_reset: 'eventAutoReferenceReset',
+  auto_reference_state: 'eventAutoReferenceState',
+};
 const LEAN_RECORD_DEFS = {
   lean_calibration: 'leanCalibration',
   lean_estimate: 'leanEstimate',
   lean_extremum: 'leanExtremum',
   lean_segment_closed: 'leanSegmentClosed',
+  lean_hint: 'leanHint',
 };
 
 const MOTION_NULL_PAIRS = [
@@ -122,18 +156,41 @@ const ANGLE_TOLERANCE_DEG = 1e-6;
 const SKEW_WARN_US = 10_000_000;
 
 const ajv = new Ajv2020({ allErrors: true, strict: false });
-for (const name of ['common', 'motion', 'lean']) {
-  ajv.addSchema(JSON.parse(readFileSync(resolve(schemaDir, `${name}.schema.json`), 'utf8')));
+for (const version of SUPPORTED_VERSIONS) {
+  const dir = resolve(here, `../motion-lean/v${version}`);
+  for (const name of ['common', 'motion', 'lean']) {
+    ajv.addSchema(JSON.parse(readFileSync(resolve(dir, `${name}.schema.json`), 'utf8')));
+  }
 }
-const ID = {
-  motion: 'https://contracts.roadscope.invalid/motion-lean/v1/motion.schema.json',
-  lean: 'https://contracts.roadscope.invalid/motion-lean/v1/lean.schema.json',
-};
 const compiled = new Map();
 function subSchema(file, name) {
-  const key = `${file}#${name}`;
-  if (!compiled.has(key)) compiled.set(key, ajv.getSchema(`${ID[file]}#/$defs/${name}`));
+  const key = `${V}#${file}#${name}`;
+  if (!compiled.has(key)) {
+    compiled.set(key, ajv.getSchema(`https://contracts.roadscope.invalid/motion-lean/v${V}/${file}.schema.json#/$defs/${name}`));
+  }
   return compiled.get(key);
+}
+
+// The version of a file is that of its first record carrying an integer
+// schemaVersion. Absent everywhere, the file is validated as v1 (and every line
+// fails its schema anyway).
+export function detectSchemaVersion(text) {
+  for (const raw of text.split('\n')) {
+    if (raw.trim() === '') continue;
+    try {
+      const record = JSON.parse(raw);
+      if (record && Number.isInteger(record.schemaVersion)) return record.schemaVersion;
+    } catch {
+      // keep looking
+    }
+  }
+  return null;
+}
+
+function unsupportedResult(kind, version) {
+  const report = newReport();
+  report.add('UNSUPPORTED_SCHEMA_VERSION', 1, `schemaVersion ${version} is not supported (known: ${SUPPORTED_VERSIONS.join(', ')})`);
+  return finish(report, { kind, samples: 0, records: 0, events: 0, unknownRecords: 0, unsupported: true, version });
 }
 
 // ---------------------------------------------------------------- shared
@@ -185,6 +242,10 @@ function* records(text, knownTypes, add, counters) {
       // log's line): preserve it, count it, keep going.
       counters.unknown += 1;
       add('UNKNOWN_RECORD_TYPE', line, String(record.recordType));
+      continue;
+    }
+    if (Number.isInteger(record.schemaVersion) && record.schemaVersion !== V) {
+      add('SCHEMA_VERSION_MIXED', line, `schemaVersion ${record.schemaVersion} in a schemaVersion ${V} file`);
       continue;
     }
     yield { record, line };
@@ -273,6 +334,9 @@ function checkMonotonic(lastByBoot, bootId, value, ctx) {
 // ---------------------------------------------------------------- motion
 
 export function validateMotionLog(text) {
+  const version = detectSchemaVersion(text) ?? 1;
+  if (!SUPPORTED_VERSIONS.includes(version)) return unsupportedResult('motion', version);
+  V = version;
   const report = newReport();
   const { add } = report;
   const counters = { unknown: 0 };
@@ -286,7 +350,10 @@ export function validateMotionLog(text) {
     started: false,
     declared: new Map(), // sourceId -> declaration of the latest motion_started
     clockState: new Map(), // sourceId -> measurementClock in force at this point of the file
-    segmentOpen: false, // true between a motion_started and the next resume/boot declaration
+    segmentOpen: false, // true between a motion_started and the next session boundary
+    sessionOrdinal: -1,
+    controlLast: -1,
+    sel: new Map(), // sourceId -> selection / accuracy tracking (v2)
     lastSeen: new Map(), // sourceId -> {sequence, boot} of the previous sample
     clockMaps: new Map(), // mapId -> event
     lastMeasurement: new Map(), // sourceId -> Map(bootId -> us)
@@ -294,16 +361,24 @@ export function validateMotionLog(text) {
     lastTime: new Map(), // sourceId -> {boot, us} for gap detection
     cover: new Map(), // sourceId -> [{boot, from, to}]
     allCover: [],
+    lastLine: 1,
   };
   // `breaks` are points where a source's input is not continuous: a replay or
   // an estimate must not straddle one. nextSeq is the first sequence after it.
-  const model = { sequences: new Map(), breaks: new Map(), declarations: new Map() };
+  // `sessions[i]` holds the declarations of the i-th session: a sample or a
+  // reference is judged by the declaration of the session it was written in.
+  const model = { version, sequences: new Map(), maxSeq: new Map(), breaks: new Map(), sessions: [], maxControl: -1 };
   let sampleCount = 0;
   let eventCount = 0;
 
   for (const { record, line } of records(text, MOTION_RECORD_TYPES, add, counters)) {
+    state.lastLine = line;
     if (record.recordType === 'motion_event') {
-      if (!checkMotionEvent(record, line, add)) continue;
+      if (!checkMotionEvent(record, line, add)) {
+        // A rejected event still consumed its controlSequence: do not cascade into a gap report.
+        if (V === 2 && Number.isInteger(record.controlSequence)) state.controlLast = Math.max(state.controlLast, record.controlSequence);
+        continue;
+      }
       eventCount += 1;
       applyMotionEvent(state, spaceOf, record, line, add, model);
       continue;
@@ -312,14 +387,24 @@ export function validateMotionLog(text) {
     sampleCount += 1;
     applyMotionSample(state, spaceOf(record.sourceId), record, line, add, model);
   }
+  if (V === 2) warnUnsettled(state, state.lastLine, add);
 
   return finish(report, {
     kind: 'motion',
+    version,
     samples: sampleCount,
     events: eventCount,
     unknownRecords: counters.unknown,
     model,
   });
+}
+
+function warnUnsettled(state, line, add) {
+  for (const [sourceId, sel] of state.sel) {
+    if (sel.policy && sel.kept > 0) {
+      add('UNSETTLED_SELECTION_WINDOW', line, `${sourceId} has ${sel.kept} stored sample(s) after the last selection_stats`);
+    }
+  }
 }
 
 function checkMotionSample(record, line, add) {
@@ -353,7 +438,7 @@ function checkMotionEvent(record, line, add) {
     add('SCHEMA_INVALID', line, ajv.errorsText(base.errors, { separator: '; ' }));
     return false;
   }
-  const defName = MOTION_EVENT_DEFS[record.eventType];
+  const defName = MOTION_EVENT_DEFS[record.eventType] ?? (V === 2 ? MOTION_EVENT_DEFS_V2[record.eventType] : undefined);
   if (!defName) {
     add('UNKNOWN_EVENT_TYPE', line, String(record.eventType));
     return true;
@@ -361,10 +446,49 @@ function checkMotionEvent(record, line, add) {
   return schemaCheck('motion', defName, record, line, add);
 }
 
+// A session ends at a resume, or (v2) at a clock_adjusted that changes the boot.
+// v1 also ended it at a UTC-only clock_adjusted. A UTC-only adjustment is not a
+// session boundary in v2: it must not reset selection buckets or policies.
+function endsSession(record) {
+  if (record.eventType === 'recording_resumed') return true;
+  if (record.eventType !== 'clock_adjusted') return false;
+  return V === 1 || record.previousDeviceBootId !== record.deviceBootId;
+}
+
+function newSelection(declaration) {
+  return {
+    policy: declaration.inputPolicy ?? null,
+    anchor: null,
+    needAnchor: true,
+    anchorMissingReported: false,
+    lastBucket: null,
+    acc: 'unobserved',
+    windowIndex: 0,
+    kept: 0,
+    firstKept: null,
+    lastKept: null,
+    accTransitions: 0,
+    bufferDropped: 0,
+    prevPendingOut: null,
+  };
+}
+
 function applyMotionEvent(state, spaceOf, record, line, add, model) {
   const declaring = record.eventType === 'clock_adjusted' || record.eventType === 'recording_resumed';
   trackBoot(state, record, declaring, line, add);
-  if (declaring) state.segmentOpen = false;
+  if (endsSession(record)) state.segmentOpen = false;
+
+  if (V === 2) {
+    const expected = state.controlLast + 1;
+    const gapAllowed = record.eventType === 'log_truncated' || record.eventType === 'recording_resumed';
+    if (record.controlSequence > expected && !gapAllowed) {
+      add('CONTROL_SEQUENCE_GAP', line, `controlSequence ${record.controlSequence}, expected ${expected}`);
+    } else if (record.controlSequence < expected) {
+      add('CONTROL_SEQUENCE_REGRESSION', line, `controlSequence ${record.controlSequence}, expected ${expected}`);
+    }
+    state.controlLast = Math.max(state.controlLast, record.controlSequence);
+    model.maxControl = state.controlLast;
+  }
 
   for (const [source, last] of Object.entries(record.lastSequences)) {
     const space = spaceOf(source);
@@ -374,28 +498,9 @@ function applyMotionEvent(state, spaceOf, record, line, add, model) {
   }
 
   switch (record.eventType) {
-    case 'motion_started': {
-      state.started = true;
-      // A repeated motion_started inside one segment must not rewrite a clock
-      // state that source_clock_state events own.
-      for (const source of record.sources) {
-        const current = state.clockState.get(source.sourceId);
-        if (state.segmentOpen && current !== undefined && current !== source.measurementClock) {
-          add('SOURCE_CLOCK_REDECLARED', line, `${source.sourceId} ${current} -> ${source.measurementClock} without source_clock_state`);
-        } else {
-          state.clockState.set(source.sourceId, source.measurementClock);
-        }
-        if (source.available) {
-          const known = model.declarations.get(source.sourceId);
-          model.declarations.set(source.sourceId, {
-            storageStride: Math.max(known?.storageStride ?? 1, source.storageStride),
-          });
-        }
-      }
-      state.segmentOpen = true;
-      state.declared = new Map(record.sources.map((s) => [s.sourceId, s]));
+    case 'motion_started':
+      applyMotionStarted(state, record, line, add, model);
       break;
-    }
     case 'source_clock_state': {
       const tracked = state.clockState.get(record.sourceId);
       if (!state.declared.has(record.sourceId)) {
@@ -410,6 +515,8 @@ function applyMotionEvent(state, spaceOf, record, line, add, model) {
       // Leaving or entering elapsed_realtime interrupts the usable input.
       pushTo(model.breaks, record.sourceId, { boot: record.deviceBootId, nextSeq: spaceOf(record.sourceId).maxSequence + 1 });
       pushTo(state.cover, record.sourceId, { boot: record.deviceBootId, from: 0, to: record.occurredMonotonicUs });
+      const sel = state.sel.get(record.sourceId);
+      if (V === 2 && sel?.policy) sel.needAnchor = true;
       break;
     }
     case 'clock_map': {
@@ -428,6 +535,11 @@ function applyMotionEvent(state, spaceOf, record, line, add, model) {
       const entry = { boot: record.deviceBootId, from, to };
       pushTo(state.cover, record.sourceId, entry);
       pushTo(model.breaks, record.sourceId, { boot: record.deviceBootId, nextSeq: spaceOf(record.sourceId).maxSequence + 1 });
+      const sel = state.sel.get(record.sourceId);
+      if (V === 2 && sel?.policy) {
+        sel.needAnchor = true;
+        if (record.reason === 'buffer_full') sel.bufferDropped += record.droppedCount;
+      }
       break;
     }
     case 'log_truncated':
@@ -438,9 +550,131 @@ function applyMotionEvent(state, spaceOf, record, line, add, model) {
       state.allCover.push({ boot: record.deviceBootId, from: 0, to: record.occurredMonotonicUs });
       break;
     }
+    case 'selection_anchor':
+      applySelectionAnchor(state, record, line, add);
+      break;
+    case 'selection_stats':
+      applySelectionStats(state, record, line, add);
+      break;
+    case 'source_accuracy_state':
+      applyAccuracyState(state, record, line, add);
+      break;
     default:
       break;
   }
+}
+
+function applyMotionStarted(state, record, line, add, model) {
+  state.started = true;
+  const newSession = !state.segmentOpen;
+  if (newSession) {
+    if (V === 2) warnUnsettled(state, line, add);
+    state.sessionOrdinal += 1;
+    model.sessions.push(new Map());
+    state.sel = new Map();
+  }
+  const sessionDecls = model.sessions[state.sessionOrdinal];
+  for (const source of record.sources) {
+    // A repeated motion_started inside one session must not rewrite a clock
+    // state that source_clock_state events own.
+    const current = state.clockState.get(source.sourceId);
+    if (state.segmentOpen && current !== undefined && current !== source.measurementClock) {
+      add('SOURCE_CLOCK_REDECLARED', line, `${source.sourceId} ${current} -> ${source.measurementClock} without source_clock_state`);
+    } else {
+      state.clockState.set(source.sourceId, source.measurementClock);
+    }
+    if (!source.available) continue;
+    if (V === 2) {
+      const hasPolicy = source.inputPolicy !== undefined;
+      if ((!hasPolicy && source.storageStride === null) || (hasPolicy && source.storageStride === 1)) {
+        add('STRIDE_POLICY_CONFLICT', line, `${source.sourceId}: inputPolicy ${hasPolicy ? 'present' : 'absent'} with storageStride ${source.storageStride}`);
+      }
+      const before = sessionDecls.get(source.sourceId);
+      if (!newSession && before) {
+        for (const field of ['inputPolicy', 'storageStride', 'gapThresholdUs', 'requestedSamplingPeriodUs']) {
+          if (canonicalJson(before[field] ?? null) !== canonicalJson(source[field] ?? null)) {
+            add('POLICY_REDECLARED', line, `${source.sourceId}.${field} changed inside one session`);
+          }
+        }
+      } else {
+        state.sel.set(source.sourceId, newSelection(source));
+      }
+    }
+    sessionDecls.set(source.sourceId, source);
+  }
+  state.segmentOpen = true;
+  state.declared = new Map(record.sources.map((s) => [s.sourceId, s]));
+}
+
+function applySelectionAnchor(state, record, line, add) {
+  const sel = state.sel.get(record.sourceId);
+  if (!sel?.policy) {
+    add('SELECTION_WITHOUT_POLICY', line, `${record.sourceId} declares no inputPolicy in this session`);
+    return;
+  }
+  if (record.policyVersion !== sel.policy.policyVersion) {
+    add('SELECTION_STATS_MISMATCH', line, `selection_anchor policyVersion ${record.policyVersion} != declared ${sel.policy.policyVersion}`);
+  }
+  const expected = state.clockState.get(record.sourceId) === 'elapsed_realtime' ? 'measurement' : 'received';
+  if (record.timeBase !== expected) {
+    add('ANCHOR_TIMEBASE_MISMATCH', line, `${record.sourceId} clock is ${state.clockState.get(record.sourceId)}: timeBase must be ${expected}`);
+  }
+  sel.anchor = { timeBase: record.timeBase, anchorUs: record.anchorUs };
+  sel.needAnchor = false;
+  sel.anchorMissingReported = false;
+  sel.lastBucket = null;
+}
+
+function applyAccuracyState(state, record, line, add) {
+  const sel = state.sel.get(record.sourceId);
+  if (!state.declared.get(record.sourceId)?.available || !sel) {
+    add('SOURCE_NOT_DECLARED', line, `${record.sourceId} is not an available source of the latest motion_started`);
+    return;
+  }
+  if (sel.acc !== record.previousAccuracyState || record.previousAccuracyState === record.accuracyState) {
+    add('ACCURACY_STATE_CHAIN', line, `${record.sourceId} is ${sel.acc}; event claims ${record.previousAccuracyState} -> ${record.accuracyState}`);
+    return;
+  }
+  sel.acc = record.accuracyState;
+  sel.accTransitions += 1;
+}
+
+function applySelectionStats(state, record, line, add) {
+  const sel = state.sel.get(record.sourceId);
+  if (!sel?.policy) {
+    add('SELECTION_WITHOUT_POLICY', line, `${record.sourceId} declares no inputPolicy in this session`);
+    return;
+  }
+  const mismatch = (detail) => add('SELECTION_STATS_MISMATCH', line, `${record.sourceId} window ${record.windowIndex}: ${detail}`);
+  if (record.policyVersion !== sel.policy.policyVersion) mismatch(`policyVersion ${record.policyVersion} != declared ${sel.policy.policyVersion}`);
+  if (record.windowIndex !== sel.windowIndex) mismatch(`windowIndex ${record.windowIndex}, expected ${sel.windowIndex}`);
+  if (record.keptCount !== sel.kept) mismatch(`keptCount ${record.keptCount} != ${sel.kept} samples stored in the window`);
+  if (record.firstKeptSequence !== sel.firstKept || record.lastKeptSequence !== sel.lastKept) {
+    mismatch(`kept range ${record.firstKeptSequence}..${record.lastKeptSequence} != stored ${sel.firstKept}..${sel.lastKept}`);
+  }
+  if (record.observedAccuracyTransitions !== null && record.observedAccuracyTransitions !== sel.accTransitions) {
+    mismatch(`observedAccuracyTransitions ${record.observedAccuracyTransitions} != ${sel.accTransitions} source_accuracy_state event(s)`);
+  }
+  if (record.complete) {
+    const received = record.receivedCount + record.pendingIn;
+    const settled =
+      record.keptCount + record.skippedIntentionalCount + record.invalidCount +
+      record.nonmonotonicCount + record.bufferDroppedCount + record.pendingOut;
+    if (received !== settled) mismatch(`receivedCount + pendingIn = ${received} but settled + pendingOut = ${settled}`);
+    if (record.bufferDroppedCount !== sel.bufferDropped) {
+      mismatch(`bufferDroppedCount ${record.bufferDroppedCount} != ${sel.bufferDropped} dropped by samples_dropped(buffer_full)`);
+    }
+    if (sel.prevPendingOut !== null && record.pendingIn !== sel.prevPendingOut) {
+      mismatch(`pendingIn ${record.pendingIn} != previous window pendingOut ${sel.prevPendingOut}`);
+    }
+  }
+  sel.prevPendingOut = record.complete ? record.pendingOut : null;
+  sel.windowIndex += 1;
+  sel.kept = 0;
+  sel.firstKept = null;
+  sel.lastKept = null;
+  sel.accTransitions = 0;
+  sel.bufferDropped = 0;
 }
 
 function pushTo(map, key, value) {
@@ -475,6 +709,7 @@ function applyMotionSample(state, space, record, line, add, model) {
   for (const flag of record.qualityFlags) {
     if (!KNOWN_MOTION_FLAGS.has(flag)) add('UNKNOWN_QUALITY_FLAG', line, flag);
   }
+  if (V === 2) checkSelection(state, record, line, add);
 
   const previousSeen = state.lastSeen.get(record.sourceId);
   applySequence(space, record, line, add, record.sourceId);
@@ -525,7 +760,44 @@ function applyMotionSample(state, space, record, line, add, model) {
   }
 
   if (!model.sequences.has(record.sourceId)) model.sequences.set(record.sourceId, new Map());
-  model.sequences.get(record.sourceId).set(record.sequence, { boot: record.deviceBootId, measurementUs: measured });
+  model.maxSeq.set(record.sourceId, Math.max(model.maxSeq.get(record.sourceId) ?? -1, record.sequence));
+  model.sequences.get(record.sourceId).set(record.sequence, {
+    boot: record.deviceBootId,
+    measurementUs: measured,
+    session: state.sessionOrdinal,
+    controlSeqBefore: state.controlLast,
+  });
+}
+
+// v2 time-bucket selection and accuracy bookkeeping for one stored sample.
+function checkSelection(state, record, line, add) {
+  const sel = state.sel.get(record.sourceId);
+  if (!sel) return;
+  const sampleState = record.accuracyLevel === null ? 'unavailable' : record.accuracyLevel;
+  if (sel.policy) {
+    if (sampleState !== sel.acc) {
+      add('ACCURACY_CHANGE_UNRECORDED', line, `${record.sourceId} accuracy is ${sampleState} but the last recorded state is ${sel.acc}: no source_accuracy_state between`);
+      sel.acc = sampleState;
+    }
+    if (sel.needAnchor || !sel.anchor) {
+      if (!sel.anchorMissingReported) {
+        add('SELECTION_ANCHOR_MISSING', line, `${record.sourceId} stores a sample with no selection_anchor in force for this clock epoch`);
+        sel.anchorMissingReported = true;
+      }
+    } else {
+      const t = sel.anchor.timeBase === 'measurement' ? record.measurementMonotonicUs : record.receivedMonotonicUs;
+      if (t !== null && t >= sel.anchor.anchorUs) {
+        const bucket = Math.floor((t - sel.anchor.anchorUs) / sel.policy.periodUs);
+        if (sel.lastBucket !== null && bucket === sel.lastBucket) {
+          add('SELECTION_BUCKET_VIOLATION', line, `${record.sourceId} stored two samples in bucket ${bucket} (periodUs ${sel.policy.periodUs})`);
+        }
+        sel.lastBucket = bucket;
+      }
+    }
+    sel.kept += 1;
+    sel.firstKept ??= record.sequence;
+    sel.lastKept = record.sequence;
+  }
 }
 
 function bootMap(map, key) {
@@ -550,7 +822,10 @@ function detectGap(state, record, measured, line, add) {
 
 // ---------------------------------------------------------------- lean
 
-export function validateLeanLog(text, { motion = null } = {}) {
+export function validateLeanLog(text, { motion = null, parent = null } = {}) {
+  const version = detectSchemaVersion(text) ?? 1;
+  if (!SUPPORTED_VERSIONS.includes(version)) return unsupportedResult('lean', version);
+  V = version;
   const report = newReport();
   const { add } = report;
   const counters = { unknown: 0 };
@@ -577,21 +852,35 @@ export function validateLeanLog(text, { motion = null } = {}) {
     unavailable: false,
     resumeAfterEpoch: null,
     strideReported: new Set(),
+    // v2
+    runId: null,
+    experimental: false,
+    startedRecord: null,
+    afterCursor: new Map(), // sourceId -> highest afterInputs sequence seen on hints / auto events
+    auto: { current: null, resetSinceState: false, hintFirstSinceReset: null, hintLast: -1, sawState: false, violation: false },
+    lastLine: 1,
   };
   let recordCount = 0;
   let eventCount = 0;
 
+  if (motion && motion.version !== V) {
+    add('SCHEMA_VERSION_MIXED', 1, `lean is schemaVersion ${V} but the motion log is schemaVersion ${motion.version}`);
+    motion = null;
+  }
+
   for (const { record, line } of records(text, LEAN_RECORD_TYPES, add, counters)) {
+    state.lastLine = line;
+    if (V === 2 && !checkRunId(state, record, line, add)) continue;
     if (record.recordType === 'lean_event') {
       if (!checkLeanEvent(record, line, add)) continue;
       eventCount += 1;
-      applyLeanEvent(state, spaceOf, record, line, add);
+      applyLeanEvent(state, spaceOf, record, line, add, motion);
       continue;
     }
     if (!checkLeanRecord(record, line, add)) continue;
     recordCount += 1;
     for (const flag of record.qualityFlags) {
-      if (!KNOWN_LEAN_FLAGS.has(flag)) add('UNKNOWN_QUALITY_FLAG', line, flag);
+      if (!knownLeanFlags().has(flag)) add('UNKNOWN_QUALITY_FLAG', line, flag);
     }
     if (!state.started) {
       add('MISSING_LEAN_STARTED', line, 'log does not open with lean_started');
@@ -611,18 +900,71 @@ export function validateLeanLog(text, { motion = null } = {}) {
       case 'lean_extremum':
         applyExtremum(state, record, line, add);
         break;
+      case 'lean_hint':
+        applyHint(state, record, line, add, motion);
+        break;
       default:
         applySegmentClosed(state, record, line, add);
     }
   }
+  if (V === 2) finishLeanV2(state, add, motion, parent);
 
   return finish(report, {
     kind: 'lean',
+    version,
     records: recordCount,
     events: eventCount,
     unknownRecords: counters.unknown,
     pairedWithMotion: motion !== null,
+    crossFileChecks: {
+      motion: motion !== null ? 'run' : 'not_run',
+      parent: state.startedRecord?.derivesFrom ? (parent ? 'run' : 'not_run') : 'not_applicable',
+    },
   });
+}
+
+// v2: one lean file holds exactly one leanRunId, and every line carries it.
+function checkRunId(state, record, line, add) {
+  if (typeof record.leanRunId !== 'string') return true; // the schema reports a missing id
+  if (state.runId === null) {
+    state.runId = record.leanRunId;
+    return true;
+  }
+  if (record.leanRunId !== state.runId) {
+    add('RUN_ID_MISMATCH', line, `leanRunId ${record.leanRunId} in a file of run ${state.runId}`);
+    return false;
+  }
+  return true;
+}
+
+function finishLeanV2(state, add, motion, parent) {
+  const auto = state.auto;
+  const scope = state.startedRecord?.replayScope;
+  if (scope?.calibration && (auto.violation || !auto.sawState || auto.current === null)) {
+    add('CALIBRATION_REPLAY_STATE_INCOMPLETE', state.lastLine, 'replayScope.calibration is true but the auto_reference_state history is missing or inconsistent');
+  }
+  const config = state.startedRecord?.qualification?.qualifiedConfiguration;
+  if (motion && config && state.startedRecord.qualification.status === 'qualified') {
+    for (const input of config.inputs) {
+      for (const decls of motion.model.sessions) {
+        const decl = decls.get(input.sourceId);
+        if (!decl) continue;
+        const actual = { sourceId: decl.sourceId, sensorType: decl.sensorType, inputPolicy: decl.inputPolicy ?? null, storageStride: decl.storageStride };
+        if (canonicalJson(actual) !== canonicalJson(input)) {
+          add('QUALIFIED_CONFIG_MISMATCH', state.startedRecord.line ?? 1, `qualifiedConfiguration input ${input.sourceId} differs from a motion session declaration`);
+          break;
+        }
+      }
+    }
+  }
+  const parentInfo = state.startedRecord?.derivesFrom;
+  if (parentInfo && parent) {
+    const prefix = parent.subarray(0, parentInfo.parentByteLength);
+    const sha = createHash('sha256').update(prefix).digest('hex');
+    if (parent.length < parentInfo.parentByteLength || sha !== parentInfo.parentPrefixSha256) {
+      add('DERIVED_RUN_PARENT_MISMATCH', 1, 'parent prefix length or SHA-256 differs from derivesFrom');
+    }
+  }
 }
 
 function checkLeanRecord(record, line, add) {
@@ -652,7 +994,7 @@ function checkLeanEvent(record, line, add) {
     add('SCHEMA_INVALID', line, ajv.errorsText(base.errors, { separator: '; ' }));
     return false;
   }
-  const defName = LEAN_EVENT_DEFS[record.eventType];
+  const defName = LEAN_EVENT_DEFS[record.eventType] ?? (V === 2 ? LEAN_EVENT_DEFS_V2[record.eventType] : undefined);
   if (!defName) {
     add('UNKNOWN_EVENT_TYPE', line, String(record.eventType));
     return true;
@@ -660,18 +1002,24 @@ function checkLeanEvent(record, line, add) {
   return schemaCheck('lean', defName, record, line, add);
 }
 
-function applyLeanEvent(state, spaceOf, record, line, add) {
+function applyLeanEvent(state, spaceOf, record, line, add, motion) {
   const declaring = record.eventType === 'clock_adjusted' || record.eventType === 'recording_resumed';
   trackBoot(state, record, declaring, line, add);
 
-  const space = spaceOf(record.sourceId);
-  if (record.lastSequence > space.maxSequence) {
-    add('EVENT_SEQUENCE_AHEAD', line, `lastSequence ${record.lastSequence} exceeds last written record ${space.maxSequence}`);
+  if (V === 2) {
+    for (const [source, last] of Object.entries(record.lastSequences)) {
+      if (last > spaceOf(source).maxSequence) {
+        add('EVENT_SEQUENCE_AHEAD', line, `${source}: lastSequences ${last} exceeds last written record ${spaceOf(source).maxSequence}`);
+      }
+    }
+  } else if (record.lastSequence > spaceOf(record.sourceId).maxSequence) {
+    add('EVENT_SEQUENCE_AHEAD', line, `lastSequence ${record.lastSequence} exceeds last written record ${spaceOf(record.sourceId).maxSequence}`);
   }
   if (record.eventType === 'lean_started') {
     state.started = true;
     state.policy = record.extremumPolicy;
     state.replayable = record.replayable;
+    if (V === 2) applyLeanStartedV2(state, record, line, add);
   }
   if (record.eventType === 'estimator_reset') {
     const expected = state.currentEpoch === null ? 0 : state.currentEpoch + 1;
@@ -684,6 +1032,9 @@ function applyLeanEvent(state, spaceOf, record, line, add) {
       });
       state.currentEpoch = record.filterEpoch;
     }
+    if (V === 2 && motion && record.initialControlCursor > motion.model.maxControl) {
+      add('CONTROL_CURSOR_AHEAD', line, `initialControlCursor ${record.initialControlCursor} exceeds the motion log's last controlSequence ${motion.model.maxControl}`);
+    }
   }
   if (record.eventType === 'estimator_state') {
     if (record.state === 'unavailable') {
@@ -695,7 +1046,16 @@ function applyLeanEvent(state, spaceOf, record, line, add) {
     }
   }
   if (record.eventType === 'log_truncated' || record.eventType === 'recording_resumed') {
-    space.expectedNext = record.resumedSequence;
+    if (V === 2) {
+      for (const [source, next] of Object.entries(record.resumedSequences)) spaceOf(source).expectedNext = next;
+      if (record.eventType === 'recording_resumed') {
+        if (state.startedRecord?.replayScope?.calibration && state.auto.current === null) state.auto.violation = true;
+        state.auto.current = null; // the pipeline is rebuilt: the initial state must be stored again
+        state.auto.resetSinceState = false;
+      }
+    } else {
+      spaceOf(record.sourceId).expectedNext = record.resumedSequence;
+    }
   }
   if (record.eventType === 'calibration_invalidated') {
     const calibration = state.calibrations.get(record.calibrationId);
@@ -705,6 +1065,109 @@ function applyLeanEvent(state, spaceOf, record, line, add) {
       calibration.invalidatedAt = record.invalidatedAtMonotonicUs;
     }
   }
+  if (record.eventType === 'auto_reference_reset') applyAutoReset(state, record, line, add, motion);
+  if (record.eventType === 'auto_reference_state') applyAutoState(state, record, line, add, motion);
+}
+
+function applyLeanStartedV2(state, record, line, add) {
+  state.startedRecord = { ...record, line };
+  state.auto = { current: null, resetSinceState: false, hintFirstSinceReset: null, hintLast: state.auto.hintLast, sawState: state.auto.sawState, violation: state.auto.violation };
+  if (record.replayable !== record.replayScope.estimate) {
+    add('REPLAY_SCOPE_MISMATCH', line, `replayable ${record.replayable} != replayScope.estimate ${record.replayScope.estimate}`);
+  }
+  if (record.replayScope.refilter) {
+    add('REFILTER_SPEC_UNRESOLVABLE', line, 'replayScope.refilter is true but this contract revision defines no filter_spec');
+  }
+  const q = record.qualification;
+  state.experimental = q.status === 'experimental';
+  if (q.status === 'qualified') {
+    if (q.qualificationRef === null) add('QUALIFIED_WITHOUT_REF', line, 'qualified run has no qualificationRef');
+    if (q.qualifiedConfiguration === null || q.configurationFingerprint === null) {
+      add('QUALIFICATION_FINGERPRINT_MISMATCH', line, 'qualified run must carry qualifiedConfiguration and configurationFingerprint');
+    } else {
+      const sha = createHash('sha256').update(canonicalJson(q.qualifiedConfiguration)).digest('hex');
+      if (sha !== q.configurationFingerprint) {
+        add('QUALIFICATION_FINGERPRINT_MISMATCH', line, 'configurationFingerprint is not the SHA-256 of the canonical qualifiedConfiguration');
+      }
+      const c = q.qualifiedConfiguration;
+      if (
+        c.algorithmVersion !== record.algorithmVersion ||
+        canonicalJson(c.extremumPolicy) !== canonicalJson(record.extremumPolicy) ||
+        c.autoReferenceConfigFingerprint !== record.autoReferenceConfigFingerprint
+      ) {
+        add('QUALIFIED_CONFIG_MISMATCH', line, 'qualifiedConfiguration differs from the algorithmVersion, extremumPolicy or autoReferenceConfigFingerprint declared by lean_started');
+      }
+    }
+  }
+}
+
+// ---- automatic reference control (0003 D.1a)
+
+function checkAfterInputs(state, record, line, add, motion) {
+  for (const { sourceId, sequence } of record.afterInputs) {
+    const previous = state.afterCursor.get(sourceId);
+    if (previous !== undefined && sequence < previous) {
+      add('HINT_CURSOR_REGRESSION', line, `afterInputs ${sourceId} ${sequence} < ${previous}`);
+    }
+    if (motion && sequence > (motion.model.maxSeq.get(sourceId) ?? -1)) {
+      add('HINT_CURSOR_AHEAD', line, `afterInputs ${sourceId} ${sequence} exceeds the motion log's last sequence`);
+    }
+    state.afterCursor.set(sourceId, Math.max(previous ?? -1, sequence));
+  }
+}
+
+function calibrationActive(state, boot) {
+  const calibration = state.currentId ? state.calibrations.get(state.currentId) : null;
+  return Boolean(
+    calibration && calibration.invalidatedAt === null && !state.closed.has(calibration.calibrationId) &&
+      (boot === undefined || calibration.deviceBootId === boot),
+  );
+}
+
+function applyAutoReset(state, record, line, add, motion) {
+  checkAfterInputs(state, record, line, add, motion);
+  state.auto.resetSinceState = true;
+  state.auto.hintFirstSinceReset = null;
+}
+
+function applyAutoState(state, record, line, add, motion) {
+  checkAfterInputs(state, record, line, add, motion);
+  const auto = state.auto;
+  const previous = auto.current;
+  const fail = (code, detail) => {
+    auto.violation = true;
+    add(code, line, detail);
+  };
+  if (record.state === 'suspended' && record.reason === 'manual_command_started' && !auto.resetSinceState) {
+    fail('AUTO_RESET_MISSING', 'entering a manual command must be preceded by auto_reference_reset');
+  }
+  if (previous === 'suspended' && record.state !== 'suspended' && !auto.resetSinceState) {
+    fail('AUTO_RESUME_WITHOUT_RESET', `leaving suspended (${record.state}) without auto_reference_reset`);
+  }
+  if (record.state === 'enabled' && (calibrationActive(state, record.deviceBootId) || state.unavailable)) {
+    fail('AUTO_ENABLED_WHILE_BLOCKED', `enabled while ${state.unavailable ? 'the estimator is unavailable' : 'a calibration is in force'}`);
+  }
+  auto.current = record.state;
+  auto.resetSinceState = false;
+  auto.sawState = true;
+}
+
+function applyHint(state, record, line, add, motion) {
+  checkAfterInputs(state, record, line, add, motion);
+  const auto = state.auto;
+  if (auto.current === null) {
+    auto.violation = true;
+    add('AUTO_STATE_MISSING', line, 'lean_hint before any auto_reference_state since lean_started / recording_resumed');
+  } else if (auto.current !== 'enabled') {
+    auto.violation = true;
+    add('HINT_WHILE_NOT_ENABLED', line, `lean_hint while the automatic reference is ${auto.current}`);
+  }
+  if (calibrationActive(state, record.deviceBootId)) {
+    auto.violation = true;
+    add('HINT_WHILE_CALIBRATED', line, 'lean_hint while a calibration is in force');
+  }
+  auto.hintFirstSinceReset ??= record.sequence;
+  auto.hintLast = Math.max(auto.hintLast, record.sequence);
 }
 
 function applyCalibration(state, record, line, add) {
@@ -742,11 +1205,30 @@ function applyCalibration(state, record, line, add) {
   if (current && current.deviceBootId === record.deviceBootId && record.effectiveFromMonotonicUs < current.effectiveFromMonotonicUs) {
     add('CALIBRATION_ORDER', line, 'effectiveFromMonotonicUs precedes the calibration it replaces');
   }
+  if (record.origin === 'carried_over') {
+    const source = state.calibrations.get(record.carriedOverFromCalibrationId);
+    if (source) {
+      const taint = taintFlags();
+      const lost = source.qualityFlags.filter((flag) => taint.has(flag) && !record.qualityFlags.includes(flag));
+      if (lost.length > 0) add('CARRIED_OVER_TAINT_DROPPED', line, `carried_over calibration dropped ${lost.join(', ')} from ${source.calibrationId}`);
+    }
+  }
+  if (V === 2 && record.evidence?.kind === 'auto_straight') checkHintRange(state, record, line, add);
   if (record.supersedesCalibrationId !== null && state.calibrations.has(record.supersedesCalibrationId)) {
     state.calibrations.get(record.supersedesCalibrationId).supersededBy = record.calibrationId;
   }
   state.calibrations.set(record.calibrationId, { ...record, invalidatedAt: null, supersededBy: null });
   state.currentId = record.calibrationId;
+}
+
+// An automatic calibration must cite every hint consumed since the last reset.
+function checkHintRange(state, record, line, add) {
+  const { firstHintSequence, lastHintSequence } = record.evidence.hintRange;
+  const auto = state.auto;
+  if (auto.hintFirstSinceReset === null || firstHintSequence !== auto.hintFirstSinceReset || lastHintSequence !== auto.hintLast) {
+    add('HINT_RANGE_INCOMPLETE', line, `hintRange ${firstHintSequence}..${lastHintSequence} must equal the hints since the last reset (${auto.hintFirstSinceReset}..${auto.hintLast})`);
+  }
+  if (lastHintSequence > auto.hintLast) add('HINT_AFTER_CALIBRATION', line, `hintRange names hint ${lastHintSequence} that is written later`);
 }
 
 function applyEstimate(state, record, line, add, motion) {
@@ -778,10 +1260,15 @@ function applyEstimate(state, record, line, add, motion) {
 
   const flags = new Set(record.qualityFlags);
   if (record.extremumEligible) {
-    const blocking = [...flags].filter((flag) => BLOCKING_LEAN_FLAGS.has(flag));
+    const blocking = [...flags].filter((flag) => blockingLeanFlags().has(flag));
     if (record.leanAngleDeg === null || blocking.length > 0) {
       add('EXTREMUM_ELIGIBLE_BLOCKED', line, `extremumEligible with ${record.leanAngleDeg === null ? 'null angle' : blocking.join(', ')}`);
     }
+  }
+
+  if (V === 2 && state.experimental) {
+    if (!flags.has('algorithm_unqualified')) add('EXPERIMENTAL_ESTIMATE_UNFLAGGED', line, 'estimate of an experimental run must carry algorithm_unqualified');
+    if (record.extremumEligible) add('EXTREMUM_IN_EXPERIMENTAL_RUN', line, 'an experimental run has no extremum-eligible estimate');
   }
 
   if (record.calibrationId === null) {
@@ -806,6 +1293,11 @@ function applyEstimate(state, record, line, add, motion) {
       if (state.closed.has(calibration.calibrationId)) {
         add('ESTIMATE_AFTER_SEGMENT_CLOSED', line, calibration.calibrationId);
       }
+      // V1-4: a tainted calibration taints every estimate that uses it, eligible or not.
+      const taint = taintFlags();
+      if (calibration.qualityFlags.some((flag) => taint.has(flag)) && !flags.has('calibration_input_unverified')) {
+        add('ESTIMATE_CALIBRATION_TAINT_DROPPED', line, `calibration ${calibration.calibrationId} carries ${calibration.qualityFlags.filter((f) => taint.has(f)).join(', ')} but the estimate lacks calibration_input_unverified`);
+      }
       if (record.leanAngleDeg !== null && !USABLE_AXIS_SOURCES.has(calibration.leanAxisSource)) {
         add('ANGLE_WITH_UNKNOWN_AXIS', line, `calibration ${calibration.calibrationId} has leanAxisSource ${calibration.leanAxisSource}`);
       }
@@ -822,6 +1314,7 @@ function applyEstimate(state, record, line, add, motion) {
 
 function checkSourceRefs(record, line, add, motion, state) {
   let newestInput = -1;
+  let newestSample = null;
   let spansBreak = false;
   for (const ref of record.sourceRefs) {
     const samples = motion.model.sequences.get(ref.sourceId);
@@ -837,14 +1330,22 @@ function checkSourceRefs(record, line, add, motion, state) {
       add('SOURCE_REF_BOOT_MISMATCH', line, `${ref.sourceId} samples belong to ${first.boot}/${last.boot}, estimate is ${record.deviceBootId}`);
       continue;
     }
+    // The session of a reference is that of the raw sample, by its position in the motion file.
+    if (first.session !== last.session) {
+      add('SOURCE_REF_SPANS_SESSIONS', line, `${ref.sourceId} ${ref.firstSequence}..${ref.lastSequence} spans motion sessions ${first.session} and ${last.session}`);
+      continue;
+    }
     if (last.measurementUs === null) {
       add('SOURCE_REF_NO_MEASUREMENT_TIME', line, `${ref.sourceId} sequence ${ref.lastSequence} has no measurement time; receive time may not stand in for it`);
       continue;
     }
+    if (last.measurementUs > newestInput || (last.measurementUs === newestInput && last.controlSeqBefore > newestSample.controlSeqBefore)) {
+      newestSample = last;
+    }
     newestInput = Math.max(newestInput, last.measurementUs);
     const breaks = (motion.model.breaks.get(ref.sourceId) ?? []).filter((b) => b.boot === record.deviceBootId);
     if (breaks.some((b) => ref.firstSequence < b.nextSeq && b.nextSeq <= ref.lastSequence)) spansBreak = true;
-    if (state.replayable && record.leanAngleDeg !== null) checkReplay(record, ref, samples, breaks, line, add, motion, state);
+    if (state.replayable && record.leanAngleDeg !== null) checkReplay(record, ref, samples, breaks, line, add, motion, state, last.session);
   }
   if (newestInput >= 0 && newestInput !== record.measurementMonotonicUs) {
     add('ESTIMATE_TIME_MISMATCH', line, `measurementMonotonicUs ${record.measurementMonotonicUs} != newest referenced input ${newestInput}`);
@@ -852,11 +1353,18 @@ function checkSourceRefs(record, line, add, motion, state) {
   if (spansBreak && !(record.leanAngleDeg === null && record.qualityFlags.includes('input_gap'))) {
     add('ESTIMATE_SPANS_GAP', line, 'referenced inputs span a recorded gap, clock change or boot change: the angle must be null with input_gap');
   }
+  if (V === 2) {
+    if (record.motionControlCursor > motion.model.maxControl) {
+      add('CONTROL_CURSOR_AHEAD', line, `motionControlCursor ${record.motionControlCursor} exceeds the motion log's last controlSequence ${motion.model.maxControl}`);
+    } else if (newestSample && record.motionControlCursor !== newestSample.controlSeqBefore) {
+      add('CONTROL_CURSOR_MISMATCH', line, `motionControlCursor ${record.motionControlCursor}, but the events before the newest input end at ${newestSample.controlSeqBefore}`);
+    }
+  }
 }
 
 // Fusion has history: an estimate depends on every input since its epoch
 // boundary, not just on the newest referenced samples.
-function checkReplay(record, ref, samples, breaks, line, add, motion, state) {
+function checkReplay(record, ref, samples, breaks, line, add, motion, state, session) {
   const initial = state.epochs.get(record.filterEpoch)?.initialInputs.get(ref.sourceId);
   if (initial === undefined) {
     add('REPLAY_INPUTS_INCOMPLETE', line, `epoch ${record.filterEpoch} declares no initial input for ${ref.sourceId}`);
@@ -871,14 +1379,18 @@ function checkReplay(record, ref, samples, breaks, line, add, motion, state) {
   } else if (breaks.some((b) => initial < b.nextSeq && b.nextSeq <= ref.lastSequence)) {
     add('REPLAY_INPUTS_INCOMPLETE', line, `${ref.sourceId} has a gap, clock change or boot change inside epoch ${record.filterEpoch}`);
   }
-  const stride = motion.model.declarations.get(ref.sourceId)?.storageStride ?? 1;
-  if (stride > 1 && !state.strideReported.has(ref.sourceId)) {
-    state.strideReported.add(ref.sourceId);
-    add('REPLAY_STRIDE_DROPS_INPUTS', line, `${ref.sourceId} storageStride ${stride} discards inputs the filter used, yet replayable is true`);
+  // V1-3: the stride is that of the session the referenced samples were written in,
+  // reported at most once per (source, session).
+  const stride = motion.model.sessions[session]?.get(ref.sourceId)?.storageStride ?? 1;
+  const key = `${ref.sourceId}|${session}`;
+  if (stride !== null && stride > 1 && !state.strideReported.has(key)) {
+    state.strideReported.add(key);
+    add('REPLAY_STRIDE_DROPS_INPUTS', line, `${ref.sourceId} storageStride ${stride} (session ${session}) discards inputs the filter used, yet replayable is true`);
   }
 }
 
 function applyExtremum(state, record, line, add) {
+  if (V === 2 && state.experimental) add('EXTREMUM_IN_EXPERIMENTAL_RUN', line, 'an experimental run writes no lean_extremum');
   const calibration = state.calibrations.get(record.calibrationId);
   if (!calibration) {
     add('CALIBRATION_UNKNOWN', line, record.calibrationId);
@@ -973,6 +1485,7 @@ function detectKind(text) {
 function main(argv) {
   const asJson = argv.includes('--json');
   let motionPath = null;
+  let parentPath = null;
   const files = [];
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === '--json') continue;
@@ -980,15 +1493,21 @@ function main(argv) {
       motionPath = argv[(i += 1)];
       continue;
     }
+    if (argv[i] === '--parent') {
+      parentPath = argv[(i += 1)];
+      continue;
+    }
     files.push(argv[i]);
   }
   if (files.length === 0) {
-    process.stderr.write('usage: validate-motion-lean.mjs [--json] [--motion <motion.ndjson>] <file.ndjson> [...]\n');
+    process.stderr.write('usage: validate-motion-lean.mjs [--json] [--motion <motion.ndjson>] [--parent <old.lean.ndjson>] <file.ndjson> [...]\n');
     return 2;
   }
   const motion = motionPath ? validateMotionLog(readFileSync(motionPath, 'utf8')) : null;
+  const parent = parentPath ? readFileSync(parentPath) : null;
 
   let failed = false;
+  let unsupported = false;
   const results = [];
   for (const file of files) {
     const text = readFileSync(file, 'utf8');
@@ -998,9 +1517,10 @@ function main(argv) {
       failed = true;
       continue;
     }
-    const { model, ...result } = kind === 'motion' ? validateMotionLog(text) : validateLeanLog(text, { motion });
+    const { model, ...result } = kind === 'motion' ? validateMotionLog(text) : validateLeanLog(text, { motion, parent });
     results.push({ file, ...result });
     if (!result.ok) failed = true;
+    if (result.unsupported) unsupported = true;
     if (asJson) continue;
     const count = kind === 'motion' ? `${result.samples} samples` : `${result.records} records`;
     process.stdout.write(
@@ -1012,6 +1532,7 @@ function main(argv) {
     }
   }
   if (asJson) process.stdout.write(`${JSON.stringify(results, null, 2)}\n`);
+  if (unsupported) return 4;
   return failed ? 1 : 0;
 }
 

@@ -1,0 +1,1049 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.roadscope.invalid/motion-lean/v2/motion.schema.json",
+  "title": "RoadScope raw motion log record, schemaVersion 2",
+  "description": "One NDJSON line of the raw motion log (accelerometer, gyroscope, attitude). See contracts/motion-lean/v2/README.md for the normative text; the schema cannot express cross-line rules or null-iff-flag pairs.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/motionSample"
+    },
+    {
+      "$ref": "#/$defs/motionEvent"
+    }
+  ],
+  "$defs": {
+    "motionSampleBase": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "const": 2
+        },
+        "recordType": {
+          "const": "motion_sample"
+        },
+        "recordingId": {
+          "$ref": "common.schema.json#/$defs/nonEmptyString"
+        },
+        "sourceId": {
+          "$ref": "common.schema.json#/$defs/nonEmptyString"
+        },
+        "sensorType": {
+          "type": "string",
+          "minLength": 1
+        },
+        "deviceBootId": {
+          "$ref": "common.schema.json#/$defs/nonEmptyString"
+        },
+        "sequence": {
+          "$ref": "common.schema.json#/$defs/sequence"
+        },
+        "measurementMonotonicUs": {
+          "oneOf": [
+            {
+              "$ref": "common.schema.json#/$defs/monotonicUs"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "SensorEvent.timestamp (ns) / 1000, rounded down, in the elapsedRealtime domain. null only when the source declares no usable measurement clock; consumers must not substitute receivedMonotonicUs."
+        },
+        "receivedMonotonicUs": {
+          "$ref": "common.schema.json#/$defs/monotonicUs"
+        },
+        "receivedAtUtc": {
+          "$ref": "common.schema.json#/$defs/utcTimestamp"
+        },
+        "clockMapId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Id of the clock_map event that maps measurementMonotonicUs to UTC for this sample. null with clock_map_unavailable."
+        },
+        "accuracyLevel": {
+          "enum": [
+            "unreliable",
+            "low",
+            "medium",
+            "high",
+            null
+          ],
+          "description": "Platform-reported sensor accuracy. null with accuracy_unavailable."
+        },
+        "qualityFlags": {
+          "$ref": "common.schema.json#/$defs/qualityFlags"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "recordType",
+        "recordingId",
+        "sourceId",
+        "sensorType",
+        "deviceBootId",
+        "sequence",
+        "measurementMonotonicUs",
+        "receivedMonotonicUs",
+        "receivedAtUtc",
+        "clockMapId",
+        "accuracyLevel",
+        "qualityFlags"
+      ]
+    },
+    "motionSample": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/accelerometerSample"
+        },
+        {
+          "$ref": "#/$defs/gyroscopeSample"
+        },
+        {
+          "$ref": "#/$defs/attitudeSample"
+        }
+      ]
+    },
+    "accelerometerSample": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/motionSampleBase"
+        }
+      ],
+      "properties": {
+        "sensorType": {
+          "const": "accelerometer"
+        },
+        "xMps2": {
+          "type": "number",
+          "minimum": -2000,
+          "maximum": 2000
+        },
+        "yMps2": {
+          "type": "number",
+          "minimum": -2000,
+          "maximum": 2000
+        },
+        "zMps2": {
+          "type": "number",
+          "minimum": -2000,
+          "maximum": 2000
+        }
+      },
+      "required": [
+        "xMps2",
+        "yMps2",
+        "zMps2"
+      ],
+      "unevaluatedProperties": false
+    },
+    "gyroscopeSample": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/motionSampleBase"
+        }
+      ],
+      "properties": {
+        "sensorType": {
+          "const": "gyroscope"
+        },
+        "xRadPerS": {
+          "type": "number",
+          "minimum": -1000,
+          "maximum": 1000
+        },
+        "yRadPerS": {
+          "type": "number",
+          "minimum": -1000,
+          "maximum": 1000
+        },
+        "zRadPerS": {
+          "type": "number",
+          "minimum": -1000,
+          "maximum": 1000
+        }
+      },
+      "required": [
+        "xRadPerS",
+        "yRadPerS",
+        "zRadPerS"
+      ],
+      "unevaluatedProperties": false
+    },
+    "attitudeSample": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/motionSampleBase"
+        }
+      ],
+      "properties": {
+        "sensorType": {
+          "const": "attitude"
+        },
+        "qw": {
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1
+        },
+        "qx": {
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1
+        },
+        "qy": {
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1
+        },
+        "qz": {
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1
+        }
+      },
+      "required": [
+        "qw",
+        "qx",
+        "qy",
+        "qz"
+      ],
+      "unevaluatedProperties": false
+    },
+    "motionEventBase": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "const": 2
+        },
+        "recordType": {
+          "const": "motion_event"
+        },
+        "eventType": {
+          "type": "string"
+        },
+        "recordingId": {
+          "$ref": "common.schema.json#/$defs/nonEmptyString"
+        },
+        "deviceBootId": {
+          "$ref": "common.schema.json#/$defs/nonEmptyString"
+        },
+        "occurredAtUtc": {
+          "$ref": "common.schema.json#/$defs/utcTimestamp"
+        },
+        "occurredMonotonicUs": {
+          "$ref": "common.schema.json#/$defs/monotonicUs"
+        },
+        "lastSequences": {
+          "type": "object",
+          "description": "sourceId -> last sample sequence written for that source before this event, -1 when none yet. Events never consume sequence numbers.",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": -1
+          }
+        },
+        "controlSequence": {
+          "$ref": "common.schema.json#/$defs/sequence",
+          "description": "Per-file counter of motion_event records: 0-based, contiguous across boots, advanced only after a successful append. Independent of sample sequences."
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "recordType",
+        "eventType",
+        "recordingId",
+        "deviceBootId",
+        "occurredAtUtc",
+        "occurredMonotonicUs",
+        "lastSequences",
+        "controlSequence"
+      ]
+    },
+    "measurementClock": {
+      "enum": [
+        "elapsed_realtime",
+        "unverified",
+        "unavailable"
+      ],
+      "description": "State of a source's measurement clock. elapsed_realtime: verified to share the SystemClock.elapsedRealtimeNanos domain; samples carry a non-null measurementMonotonicUs. unverified: not (or no longer) proven; samples carry null. unavailable: no usable measurement clock; samples carry null. The state in force for a sample is the latest declaration or source_clock_state event before it in file order; changes are never retroactive."
+    },
+    "sourceDeclaration": {
+      "type": "object",
+      "properties": {
+        "sourceId": {
+          "$ref": "common.schema.json#/$defs/nonEmptyString"
+        },
+        "sensorType": {
+          "type": "string",
+          "minLength": 1
+        },
+        "available": {
+          "type": "boolean"
+        },
+        "unavailableReason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "measurementClock": {
+          "$ref": "#/$defs/measurementClock"
+        },
+        "axisFrame": {
+          "enum": [
+            "android_sensor",
+            "core_motion_device"
+          ]
+        },
+        "attitudeReference": {
+          "enum": [
+            "game_rotation_vector",
+            "rotation_vector",
+            "core_motion_arbitrary_z_vertical"
+          ]
+        },
+        "platformFused": {
+          "type": "boolean"
+        },
+        "requestedSamplingPeriodUs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "maxReportLatencyUs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "storageStride": {
+          "enum": [
+            1,
+            null
+          ],
+          "description": "1: every event stored, no inputPolicy. null: only with inputPolicy (time bucket selection). Any other value is invalid in v2."
+        },
+        "gapThresholdUs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "inputPolicy": {
+          "$ref": "#/$defs/inputPolicy"
+        }
+      },
+      "required": [
+        "sourceId",
+        "sensorType",
+        "available",
+        "measurementClock"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "available": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "axisFrame",
+              "platformFused",
+              "requestedSamplingPeriodUs",
+              "maxReportLatencyUs",
+              "storageStride",
+              "gapThresholdUs"
+            ]
+          },
+          "else": {
+            "required": [
+              "unavailableReason"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "sensorType": {
+                "const": "attitude"
+              },
+              "available": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "attitudeReference"
+            ]
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "motionEvent": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/eventMotionStarted"
+        },
+        {
+          "$ref": "#/$defs/eventClockMap"
+        },
+        {
+          "$ref": "#/$defs/eventSourceClockState"
+        },
+        {
+          "$ref": "#/$defs/eventSamplesDropped"
+        },
+        {
+          "$ref": "#/$defs/eventClockAdjusted"
+        },
+        {
+          "$ref": "#/$defs/eventLogTruncated"
+        },
+        {
+          "$ref": "#/$defs/eventRecordingResumed"
+        },
+        {
+          "$ref": "#/$defs/eventSelectionAnchor"
+        },
+        {
+          "$ref": "#/$defs/eventSelectionStats"
+        },
+        {
+          "$ref": "#/$defs/eventSourceAccuracyState"
+        }
+      ]
+    },
+    "eventMotionStarted": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/motionEventBase"
+        }
+      ],
+      "properties": {
+        "eventType": {
+          "const": "motion_started"
+        },
+        "platform": {
+          "$ref": "common.schema.json#/$defs/platform"
+        },
+        "appVersion": {
+          "$ref": "common.schema.json#/$defs/nonEmptyString"
+        },
+        "bootAnchorUtcMs": {
+          "type": "integer"
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/sourceDeclaration"
+          }
+        }
+      },
+      "required": [
+        "eventType",
+        "platform",
+        "appVersion",
+        "bootAnchorUtcMs",
+        "sources"
+      ],
+      "unevaluatedProperties": false
+    },
+    "eventClockMap": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/motionEventBase"
+        }
+      ],
+      "properties": {
+        "eventType": {
+          "const": "clock_map"
+        },
+        "mapId": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "effectiveFromMonotonicUs": {
+          "$ref": "common.schema.json#/$defs/monotonicUs"
+        },
+        "offsetUtcMinusMonotonicUs": {
+          "type": "integer",
+          "description": "UTC microseconds since the Unix epoch minus monotonic microseconds. utcUs = measurementMonotonicUs + offset."
+        },
+        "mappingSource": {
+          "enum": [
+            "wall_clock_pair",
+            "gps_fix_pair",
+            "carried_forward"
+          ]
+        },
+        "uncertaintyUs": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Writer-claimed half-width bound of the mapping error. An unverified claim, not a measured accuracy."
+        }
+      },
+      "required": [
+        "eventType",
+        "mapId",
+        "effectiveFromMonotonicUs",
+        "offsetUtcMinusMonotonicUs",
+        "mappingSource",
+        "uncertaintyUs"
+      ],
+      "unevaluatedProperties": false
+    },
+    "eventSourceClockState": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/motionEventBase"
+        }
+      ],
+      "properties": {
+        "eventType": {
+          "const": "source_clock_state"
+        },
+        "sourceId": {
+          "$ref": "common.schema.json#/$defs/nonEmptyString"
+        },
+        "previousMeasurementClock": {
+          "$ref": "#/$defs/measurementClock"
+        },
+        "measurementClock": {
+          "$ref": "#/$defs/measurementClock"
+        },
+        "reason": {
+          "enum": [
+            "verification_passed",
+            "verification_failed",
+            "clock_domain_changed"
+          ]
+        }
+      },
+      "required": [
+        "eventType",
+        "sourceId",
+        "previousMeasurementClock",
+        "measurementClock",
+        "reason"
+      ],
+      "unevaluatedProperties": false
+    },
+    "eventSamplesDropped": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/motionEventBase"
+        },
+        {
+          "if": {
+            "properties": {
+              "droppedCount": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "droppedCount"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "sensor_unavailable",
+                  "sensor_interrupted",
+                  "writer_error"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "eventType": {
+          "const": "samples_dropped"
+        },
+        "sourceId": {
+          "$ref": "common.schema.json#/$defs/nonEmptyString"
+        },
+        "droppedCount": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "null when the count is unknowable (a sensor interruption). Writers must not guess; null is only legal for sensor_unavailable, sensor_interrupted and writer_error."
+        },
+        "firstDroppedMonotonicUs": {
+          "oneOf": [
+            {
+              "$ref": "common.schema.json#/$defs/monotonicUs"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lastDroppedMonotonicUs": {
+          "oneOf": [
+            {
+              "$ref": "common.schema.json#/$defs/monotonicUs"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "enum": [
+            "buffer_full",
+            "writer_error",
+            "sensor_unavailable",
+            "sensor_interrupted",
+            "recording_paused",
+            "measurement_nonmonotonic"
+          ]
+        }
+      },
+      "required": [
+        "eventType",
+        "sourceId",
+        "droppedCount",
+        "firstDroppedMonotonicUs",
+        "lastDroppedMonotonicUs",
+        "reason"
+      ],
+      "unevaluatedProperties": false
+    },
+    "eventClockAdjusted": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/motionEventBase"
+        }
+      ],
+      "properties": {
+        "eventType": {
+          "const": "clock_adjusted"
+        },
+        "previousDeviceBootId": {
+          "$ref": "common.schema.json#/$defs/nonEmptyString"
+        },
+        "previousBootAnchorUtcMs": {
+          "type": "integer"
+        },
+        "bootAnchorUtcMs": {
+          "type": "integer"
+        },
+        "thresholdMs": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "eventType",
+        "previousDeviceBootId",
+        "previousBootAnchorUtcMs",
+        "bootAnchorUtcMs",
+        "thresholdMs"
+      ],
+      "unevaluatedProperties": false
+    },
+    "eventLogTruncated": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/motionEventBase"
+        }
+      ],
+      "properties": {
+        "eventType": {
+          "const": "log_truncated"
+        },
+        "truncatedBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "resumedSequences": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "required": [
+        "eventType",
+        "truncatedBytes",
+        "resumedSequences"
+      ],
+      "unevaluatedProperties": false
+    },
+    "eventRecordingResumed": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/motionEventBase"
+        }
+      ],
+      "properties": {
+        "eventType": {
+          "const": "recording_resumed"
+        },
+        "reason": {
+          "$ref": "common.schema.json#/$defs/resumeReason"
+        },
+        "resumedSequences": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "required": [
+        "eventType",
+        "reason",
+        "resumedSequences"
+      ],
+      "unevaluatedProperties": false
+    },
+    "inputPolicy": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "time_bucket_first"
+        },
+        "periodUs": {
+          "type": "integer",
+          "minimum": 1000
+        },
+        "policyVersion": {
+          "$ref": "common.schema.json#/$defs/nonEmptyString"
+        },
+        "lossy": {
+          "const": true
+        },
+        "verifiedAnchorRule": {
+          "const": "first_verified_measurement"
+        },
+        "unverifiedRule": {
+          "const": "received_time_bucket"
+        }
+      },
+      "required": [
+        "kind",
+        "periodUs",
+        "policyVersion",
+        "lossy",
+        "verifiedAnchorRule",
+        "unverifiedRule"
+      ],
+      "additionalProperties": false
+    },
+    "eventSelectionAnchor": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/motionEventBase"
+        }
+      ],
+      "properties": {
+        "eventType": {
+          "const": "selection_anchor"
+        },
+        "sourceId": {
+          "$ref": "common.schema.json#/$defs/nonEmptyString"
+        },
+        "policyVersion": {
+          "$ref": "common.schema.json#/$defs/nonEmptyString"
+        },
+        "timeBase": {
+          "enum": [
+            "measurement",
+            "received"
+          ]
+        },
+        "anchorUs": {
+          "$ref": "common.schema.json#/$defs/monotonicUs"
+        },
+        "reason": {
+          "enum": [
+            "start",
+            "clock_epoch",
+            "gap",
+            "resume"
+          ]
+        }
+      },
+      "required": [
+        "eventType",
+        "sourceId",
+        "policyVersion",
+        "timeBase",
+        "anchorUs",
+        "reason"
+      ],
+      "unevaluatedProperties": false
+    },
+    "eventSelectionStats": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/motionEventBase"
+        },
+        {
+          "if": {
+            "properties": {
+              "keptCount": {
+                "const": 0
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "firstKeptSequence": {
+                "type": "null"
+              },
+              "lastKeptSequence": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "firstKeptSequence": {
+                "type": "integer"
+              },
+              "lastKeptSequence": {
+                "type": "integer"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "complete": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "receivedCount": {
+                "type": "integer"
+              },
+              "skippedIntentionalCount": {
+                "type": "integer"
+              },
+              "invalidCount": {
+                "type": "integer"
+              },
+              "nonmonotonicCount": {
+                "type": "integer"
+              },
+              "bufferDroppedCount": {
+                "type": "integer"
+              },
+              "pendingIn": {
+                "type": "integer"
+              },
+              "pendingOut": {
+                "type": "integer"
+              },
+              "observedAccuracyTransitions": {
+                "type": "integer"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "closeReason": {
+                "const": "recovered_unsettled"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "complete": {
+                "const": false
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "eventType": {
+          "const": "selection_stats"
+        },
+        "sourceId": {
+          "$ref": "common.schema.json#/$defs/nonEmptyString"
+        },
+        "policyVersion": {
+          "$ref": "common.schema.json#/$defs/nonEmptyString"
+        },
+        "windowIndex": {
+          "$ref": "common.schema.json#/$defs/sequence"
+        },
+        "closeReason": {
+          "enum": [
+            "periodic",
+            "sync",
+            "segment_end",
+            "stop",
+            "session_end",
+            "recovered_unsettled"
+          ]
+        },
+        "firstKeptSequence": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "lastKeptSequence": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "keptCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "receivedCount": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "skippedIntentionalCount": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "invalidCount": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "nonmonotonicCount": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "bufferDroppedCount": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "pendingIn": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "pendingOut": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "observedAccuracyTransitions": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "complete": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "eventType",
+        "sourceId",
+        "policyVersion",
+        "windowIndex",
+        "closeReason",
+        "firstKeptSequence",
+        "lastKeptSequence",
+        "keptCount",
+        "receivedCount",
+        "skippedIntentionalCount",
+        "invalidCount",
+        "nonmonotonicCount",
+        "bufferDroppedCount",
+        "pendingIn",
+        "pendingOut",
+        "observedAccuracyTransitions",
+        "complete"
+      ],
+      "unevaluatedProperties": false
+    },
+    "eventSourceAccuracyState": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/motionEventBase"
+        }
+      ],
+      "properties": {
+        "eventType": {
+          "const": "source_accuracy_state"
+        },
+        "sourceId": {
+          "$ref": "common.schema.json#/$defs/nonEmptyString"
+        },
+        "previousAccuracyState": {
+          "$ref": "common.schema.json#/$defs/accuracyState"
+        },
+        "accuracyState": {
+          "$ref": "common.schema.json#/$defs/accuracyState"
+        },
+        "atMeasurementMonotonicUs": {
+          "oneOf": [
+            {
+              "$ref": "common.schema.json#/$defs/monotonicUs"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "atReceivedMonotonicUs": {
+          "$ref": "common.schema.json#/$defs/monotonicUs"
+        },
+        "reason": {
+          "enum": [
+            "accuracy_callback",
+            "sample_observed"
+          ]
+        }
+      },
+      "required": [
+        "eventType",
+        "sourceId",
+        "previousAccuracyState",
+        "accuracyState",
+        "atMeasurementMonotonicUs",
+        "atReceivedMonotonicUs",
+        "reason"
+      ],
+      "unevaluatedProperties": false
+    }
+  }
+}

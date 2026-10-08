@@ -45,3 +45,21 @@ jobs:
             node validate-motion-lean.mjs --motion "$dir/motion.ndjson" "$dir/motion.ndjson" "$dir/lean.ndjson"
           done
         working-directory: contracts/tools
+      - name: validate valid v2 motion/lean fixtures
+        run: |
+          node validate-motion-lean.mjs ../../testdata/contracts/motion-lean/v2/motion/valid/*.ndjson
+          node validate-motion-lean.mjs ../../testdata/contracts/motion-lean/v2/lean/valid/*.ndjson
+          for dir in ../../testdata/contracts/motion-lean/v2/pairs/valid/*/; do
+            node validate-motion-lean.mjs --motion "$dir/motion.ndjson" "$dir/motion.ndjson" "$dir/lean.ndjson"
+          done
+          for dir in ../../testdata/contracts/motion-lean/v2/runs/valid/*/; do
+            node validate-motion-lean.mjs --parent "$dir/parent.ndjson" "$dir/lean.ndjson"
+          done
+        working-directory: contracts/tools
+      # exit 4: the tool must refuse an unsupported schemaVersion instead of reporting PASS.
+      - name: unsupported schemaVersion is not a pass
+        run: |
+          set +e
+          node validate-motion-lean.mjs ../../testdata/contracts/motion-lean/v2/motion/invalid/02-unsupported-schema-version.ndjson
+          test $? -eq 4
+        working-directory: contracts/tools

@@ -1,0 +1,18 @@
+{
+  "tool": "7474933",
+  "lean": {
+    "ok": true,
+    "findings": [
+      {
+        "code": "UNKNOWN_QUALITY_FLAG",
+        "severity": "warn",
+        "line": 3
+      },
+      {
+        "code": "UNKNOWN_QUALITY_FLAG",
+        "severity": "warn",
+        "line": 4
+      }
+    ]
+  }
+}

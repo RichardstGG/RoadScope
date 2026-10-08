@@ -571,3 +571,17 @@ R-01、R-02 同時涵蓋 2→1 與 1→2 兩種方向。R-03～R-05 是歷史收
 - 父檔雜湊在背景計算，期間 GPS 不受影響；`derivesFrom` 完整前不寫新 run 的 `lean_started`。
 - `replayScope.*` 在 Kotlin 側有確定性重播測試與完整控制事件／hint／spec 之前，一律維持 `false`。
 - 現有 `LeanReplayAssertions` 只涵蓋小型合成 raw＋既定校準（F1 §2），不是 C3 重播器。
+
+## J. C1 實作對照（實作時與本設計稿的出入）
+
+C1 的規範本文是 [`contracts/motion-lean/v2/README.md`](../../contracts/motion-lean/v2/README.md)；與本文件有出入處以該 README 為準。出入：
+
+1. **`AUTO_RESET_MISSING` 的語義縮小。** 本文件 I-24h 設想「暫停中第二次 reset 被省略」可由配對 fixture 偵測。單一檔案內做不到（需要完整重播基準）。C1 的 `AUTO_RESET_MISSING` 只檢查「進入手動指令前沒有 `auto_reference_reset`」；「某次 reset 被省略」改由 Kotlin 重播驗收負責，v2 README §8 明寫驗證器通過不代表 reset 完整。I-24h 因此不是驗證器 fixture。
+2. **`QUALIFICATION_UNSPECIFIED` 取消。** v2 的 `qualification` 為必填；v1 檔沒有此欄位，不產生新警告。
+3. **`ACCURACY_CHANGE_UNRECORDED` 只對有 `inputPolicy` 的來源檢查**（全存來源的轉換在樣本本身可見）。
+4. **新增錯誤碼**：`CONTROL_SEQUENCE_REGRESSION`、`SELECTION_ANCHOR_MISSING`、`ANCHOR_TIMEBASE_MISMATCH`、`SELECTION_WITHOUT_POLICY`、`EXPERIMENTAL_ESTIMATE_UNFLAGGED`（設計稿未列）。
+5. **`--location`（`HINT_GPS_MISMATCH`）、`--qualification-registry`、`lean_input`／`filter_spec`／`FILTER_*`／`REFILTER_*`（除 `REFILTER_SPEC_UNRESOLVABLE`）、exit 3／130、有界引擎**：未在 C1 實作；`lean_hint.gpsRef` 目前只是可為 `null` 的參照，不被核對。
+6. **`lean_started.inputSourceIds` 在 v2 由 `inputSources[]` 取代**；`lean_event` 的 `lastSequence`／`resumedSequence` 在 v2 改為 `lastSequences`／`resumedSequences`。
+7. **`auto_reference_reset.reason`** 列為 `session｜boot｜manual_command｜epoch_reset｜explicit`；`auto_reference_state` 的 reason 清單與 §D.1a 相同。
+8. 驗證器只能核對 `AUTO_ENABLED_WHILE_BLOCKED` 的「現行校準」與「估算不可用」兩種阻擋；`experimental` 輸入在檔案中沒有可核對的來源。
+9. **v1 回歸 R-01～R-06 的舊工具欄是實跑結果**（`7474933` 凍結副本，記於各案 `old-tool.json`）：R-01 在 session B 的引用處誤報（false positive）；R-02a 在 session A 的引用處報（錯誤 session）；R-02b 在 B 報（位置碰巧正確）；R-02c 在 A 誤報；R-03～R-06 舊工具只有 `UNKNOWN_QUALITY_FLAG` 警告。與 §F 的推導一致。

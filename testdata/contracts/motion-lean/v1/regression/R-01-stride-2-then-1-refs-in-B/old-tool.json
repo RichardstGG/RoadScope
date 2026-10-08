@@ -1,0 +1,17 @@
+{
+  "tool": "7474933",
+  "motion": {
+    "ok": true,
+    "findings": []
+  },
+  "lean": {
+    "ok": false,
+    "findings": [
+      {
+        "code": "REPLAY_STRIDE_DROPS_INPUTS",
+        "severity": "error",
+        "line": 5
+      }
+    ]
+  }
+}

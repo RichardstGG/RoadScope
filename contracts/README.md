@@ -8,6 +8,7 @@
 |---|---|---|
 | [`location-log/v1`](location-log/v1/README.md) | v1 草案，待 Codex 驗證 | 裝置本機原生 NDJSON 位置紀錄與匯入規則 |
 | [`motion-lean/v1`](motion-lean/v1/README.md) | v1 草案，待 Codex 確認原生可實作性 | 裝置本機原始動態感測（加速度／角速度／姿態）與衍生傾角紀錄、校準分段與最大值 |
+| [`motion-lean/v2`](motion-lean/v2/README.md) | v2 設計修訂（C1），待 Codex 復核；未生效 | v1 的可靠性修訂：session／時間選樣、準確度狀態、控制序號、run 識別、資格與污染、自動參考控制狀態。新工具同時讀 v1 與 v2 |
 | 車隊 HTTP（OpenAPI） | 未開始 | 待 `docs/engineering-rules.md` §10 第 1、2、3、5、6 項定案 |
 | 車隊 WebSocket（JSON Schema） | 未開始 | 同上 |
 
@@ -22,7 +23,7 @@ node contracts/tools/validate-location-log.mjs [--json] <file.ndjson> [...]
 node contracts/tools/validate-motion-lean.mjs [--json] [--motion <motion.ndjson>] <file.ndjson> [...]
 ```
 
-fixtures 在 `testdata/contracts/`，與契約同版本（location-log 在 `location-log/v1/`，motion／lean 在 `motion-lean/v1/`）。
+fixtures 在 `testdata/contracts/`，與契約同版本（location-log 在 `location-log/v1/`，motion／lean 在 `motion-lean/v1/` 與 `motion-lean/v2/`）。v2 fixtures 由 `contracts/tools/test/build-v2-fixtures.mjs` 產生，`npm test` 檢查是否漂移。
 
 ## 型別策略
 

@@ -9,8 +9,9 @@
   },
   "scripts": {
     "validate": "node validate-location-log.mjs",
-    "test": "node test/run-fixtures.mjs && node test/run-motion-lean-fixtures.mjs",
-    "validate:motion-lean": "node validate-motion-lean.mjs"
+    "test": "node test/run-fixtures.mjs && node test/build-v2-fixtures.mjs --check && node test/run-motion-lean-fixtures.mjs",
+    "validate:motion-lean": "node validate-motion-lean.mjs",
+    "build:v2-fixtures": "node test/build-v2-fixtures.mjs"
   },
   "dependencies": {
     "ajv": "8.17.1"

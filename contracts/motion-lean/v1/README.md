@@ -418,3 +418,17 @@ Codex 對 PR 初版的實作決定（已採納為契約前提，不再是開放�
 3. 儲存量（約 180 MB／小時）在目標手機上是否可接受；若需降頻，必須同時把 `replayable` 宣告為 `false`（§9.4）。
 4. §9.4 第 5 點的寫入順序在崩潰時能否保證，或需要在續錄時主動比對兩個檔案。
 5. `after_input_gap`／濾波收斂條件的具體判定（屬演算法版本）。
+
+## 15. 修正紀錄（0003，與 v2 同一次修訂）
+
+PR #10 尚未合併，下列是對 v1 的**歷史修正**，不是新欄位；已存在的 v1 檔若違反，結果是「不符合修正後的規則」，檔案不被改寫。決策見 [`docs/decisions/0003-motion-lean-reliability-r2.md`](../../../docs/decisions/0003-motion-lean-reliability-r2.md) §A.3；新語義見 [`../v2/README.md`](../v2/README.md)。
+
+| # | 修正 | 影響 |
+|---|---|---|
+| V1-1 | `sensor_accuracy_unreliable`、`calibration_input_unverified` 列為已知旗標 | 原本的 `UNKNOWN_QUALITY_FLAG` 警告消失 |
+| V1-2 | 兩旗標列為阻擋旗標 | 估算 `extremumEligible=true` 又帶任一旗標 → `EXTREMUM_ELIGIBLE_BLOCKED` |
+| V1-3 | 宣告按 session 解析，取代整檔最大的 `storageStride` | `REPLAY_STRIDE_DROPS_INPUTS` 以引用樣本所屬 session 的宣告判定，每個（來源, session）至多報一次；報告位置與是否報告都可能改變（雙向，見 `testdata/contracts/motion-lean/v1/regression/`） |
+| V1-4 | 污染傳遞：校準帶任一污染旗標，使用它的估算必須帶 `calibration_input_unverified` | `ESTIMATE_CALIBRATION_TAINT_DROPPED`；**不限於 eligible 的估算** |
+| V1-5 | `carried_over` 校準保留來源校準的污染旗標 | `CARRIED_OVER_TAINT_DROPPED` |
+
+v1 的污染集合只有兩個旗標；`sensor_accuracy_unknown` 屬 v2，在 v1 檔中仍是未知旗標。工具執行層面的新 exit code（`4`；C2 的 `3`、`130`）適用任何版本，且執行未完成時不得報 PASS。
