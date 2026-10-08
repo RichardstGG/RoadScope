@@ -182,6 +182,21 @@ motionCase('valid', '01b-time-bucket-minimal', bucketLog());
   motionCase('valid', '09-control-gap-accounted-by-truncation', log);
 }
 
+{
+  // A gap owes a new anchor; it may not reach back before the last stored sample.
+  const log = new MotionLog();
+  log.started([bucketSource()]);
+  log.clockMap(0);
+  log.accuracyState(ACC, 'unobserved', 'high', { atReceived: T0 });
+  log.anchor(ACC);
+  log.samples_(ACC, T0, 2);
+  log.dropped(ACC, 3, 'buffer_full');
+  log.anchor(ACC, { anchorUs: T0 + 100000, reason: 'gap' });
+  log.samples_(ACC, T0 + 100000, 2);
+  log.stats(ACC, { kept: 4, first: 0, last: 3, received: 9, skipped: 2, dropped: 3, obs: 1 });
+  motionCase('valid', '10-anchor-after-gap', log);
+}
+
 // ------------------------------------------------------------ motion invalid
 
 {
@@ -297,6 +312,53 @@ for (const [name, override, codes] of [
   const log = fullLog(2);
   log.anchor(ACC); // the session declares no inputPolicy
   motionCase('invalid', '14-selection-event-without-policy', log, { expected: ['SELECTION_WITHOUT_POLICY'] });
+}
+{
+  // C1-1: a future anchor must not hide three samples in one bucket.
+  const log = new MotionLog();
+  log.started([bucketSource()]);
+  log.clockMap(0);
+  log.accuracyState(ACC, 'unobserved', 'high', { atReceived: T0 });
+  log.anchor(ACC, { anchorUs: 2_000_000_000 });
+  for (const dt of [0, 1000, 2000]) log.sample(ACC, T0 + dt);
+  log.stats(ACC, { kept: 3, first: 0, last: 2, received: 3, obs: 1 });
+  motionCase('invalid', '16a-future-anchor-hides-bucket-violation', log, { expected: ['SELECTION_SAMPLE_BEFORE_ANCHOR'] });
+  const early = new MotionLog();
+  early.started([bucketSource()]);
+  early.clockMap(0);
+  early.accuracyState(ACC, 'unobserved', 'high', { atReceived: T0 });
+  early.anchor(ACC, { anchorUs: T0 + 1 }); // one microsecond after the first sample
+  early.sample(ACC, T0);
+  early.stats(ACC, { kept: 1, first: 0, last: 0, received: 1, obs: 1 });
+  motionCase('invalid', '16b-sample-one-microsecond-before-anchor', early, { expected: ['SELECTION_SAMPLE_BEFORE_ANCHOR'] });
+  // An anchor nothing asked for could move the bucket boundary: two samples 5 ms apart pass.
+  const moved = new MotionLog();
+  moved.started([bucketSource()]);
+  moved.clockMap(0);
+  moved.accuracyState(ACC, 'unobserved', 'high', { atReceived: T0 });
+  moved.anchor(ACC);
+  moved.sample(ACC, T0);
+  moved.anchor(ACC, { anchorUs: T0 + 5000, reason: 'gap' });
+  moved.sample(ACC, T0 + 5000);
+  moved.stats(ACC, { kept: 2, first: 0, last: 1, received: 2, obs: 1 });
+  motionCase('invalid', '16c-unjustified-anchor-moves-bucket-boundary', moved, { expected: ['SELECTION_ANCHOR_UNJUSTIFIED'] });
+  const reason = new MotionLog();
+  reason.started([bucketSource()]);
+  reason.clockMap(0);
+  reason.accuracyState(ACC, 'unobserved', 'high', { atReceived: T0 });
+  reason.anchor(ACC, { reason: 'clock_epoch' }); // the session owes start|resume, not clock_epoch
+  reason.sample(ACC, T0);
+  motionCase('invalid', '16d-anchor-reason-does-not-match-the-cause', reason, { expected: ['SELECTION_ANCHOR_UNJUSTIFIED'] });
+  const back = new MotionLog();
+  back.started([bucketSource()]);
+  back.clockMap(0);
+  back.accuracyState(ACC, 'unobserved', 'high', { atReceived: T0 });
+  back.anchor(ACC);
+  back.samples_(ACC, T0 + 100000, 2);
+  back.dropped(ACC, 2, 'buffer_full');
+  back.anchor(ACC, { anchorUs: T0, reason: 'gap' }); // reaches back before the stored samples
+  back.sample(ACC, T0 + 400000);
+  motionCase('invalid', '16e-anchor-reaches-back', back, { expected: ['SELECTION_ANCHOR_REGRESSION'] });
 }
 {
   // The same record with its keys in another order is a duplicate, not a conflict.
@@ -437,6 +499,37 @@ function experimentalBase(o = {}) {
   log.autoState('enabled', 'recovery', [{ sourceId: ACC, sequence: 0 }]); // the initial state is stored again after a resume
   log.hint({ i: 1 });
   leanCase('valid', '05g-initial-state-stored-again-after-resume', log);
+}
+
+{ // the estimator becomes unavailable while the automatic reference is enabled, then recovers
+  const log = new LeanLog();
+  log.started({ replayScope: { estimate: false, calibration: true, refilter: false } });
+  log.reset();
+  log.autoState('enabled', 'initial', []);
+  log.hint({ i: 0 });
+  log.estimatorState('unavailable', 'input_interrupted');
+  log.autoReset('epoch_reset', [{ sourceId: ACC, sequence: 0 }]);
+  log.autoState('disabled', 'estimator_unavailable', [{ sourceId: ACC, sequence: 0 }]);
+  log.estimatorState('available');
+  log.reset([{ sourceId: ACC, firstSequence: 3 }], { reason: 'input_clock_state_change' });
+  log.autoState('enabled', 'estimator_available', [{ sourceId: ACC, sequence: 2 }]);
+  log.hint({ i: 3 });
+  leanCase('valid', '05h-estimator-unavailable-then-recovered', log);
+}
+{ // unavailable while already suspended: nothing is owed, the manual command's state stands
+  const log = new LeanLog();
+  log.started({ replayScope: { estimate: false, calibration: true, refilter: false } });
+  log.reset();
+  log.autoState('enabled', 'initial', []);
+  log.autoReset('manual_command', []);
+  log.autoState('suspended', 'manual_command_started', []);
+  log.estimatorState('unavailable', 'input_interrupted');
+  log.estimatorState('available');
+  log.reset([{ sourceId: ACC, firstSequence: 1 }], { reason: 'input_clock_state_change' });
+  log.autoReset('manual_command', []);
+  log.autoState('enabled', 'manual_command_cancelled', []);
+  log.hint({ i: 1 });
+  leanCase('valid', '05i-unavailable-while-suspended', log);
 }
 
 // ------------------------------------------------------------ lean invalid
@@ -605,6 +698,84 @@ function experimentalBase(o = {}) {
   late.calibration('cal-auto', { from: T0 + 40000, origin: 'auto_straight_ride', hintRange: { firstHintSequence: 0, lastHintSequence: 4 } });
   leanCase('invalid', '11b-hint-range-names-a-later-hint', late, { expected: ['HINT_AFTER_CALIBRATION', 'HINT_RANGE_INCOMPLETE'] });
 }
+{ // C1-2: an old `enabled` must not make a hint acceptable once the file says the estimator is unavailable
+  const log = new LeanLog();
+  log.started({ replayScope: { estimate: false, calibration: true, refilter: false } });
+  log.reset();
+  log.autoState('enabled', 'initial', []);
+  log.estimatorState('unavailable', 'input_interrupted');
+  log.hint({ i: 0 });
+  leanCase('invalid', '13a-hint-after-unavailable-without-transition', log, { expected: ['HINT_WHILE_ESTIMATOR_UNAVAILABLE', 'AUTO_STATE_TRANSITION_MISSING', 'CALIBRATION_REPLAY_STATE_INCOMPLETE'] });
+  const stored = new LeanLog();
+  stored.started({});
+  stored.reset();
+  stored.autoState('enabled', 'initial', []);
+  stored.estimatorState('unavailable', 'input_interrupted');
+  stored.autoReset('epoch_reset', []);
+  stored.autoState('disabled', 'estimator_unavailable', []);
+  stored.hint({ i: 0 }); // transition stored, but the state is disabled
+  leanCase('invalid', '13b-hint-while-disabled-after-unavailable', stored, { expected: ['HINT_WHILE_ESTIMATOR_UNAVAILABLE', 'HINT_WHILE_NOT_ENABLED'] });
+  const recovered = new LeanLog();
+  recovered.started({});
+  recovered.reset();
+  recovered.autoState('enabled', 'initial', []);
+  recovered.estimatorState('unavailable', 'input_interrupted');
+  recovered.estimatorState('available');
+  recovered.reset([{ sourceId: ACC, firstSequence: 1 }], { reason: 'input_clock_state_change' });
+  recovered.hint({ i: 1 }); // available again, but the owed disabled/enabled transitions were never stored
+  leanCase('invalid', '13c-recovery-without-stored-transitions', recovered, { expected: ['AUTO_STATE_TRANSITION_MISSING'], absent: ['HINT_WHILE_ESTIMATOR_UNAVAILABLE'] });
+  const noReset = new LeanLog();
+  noReset.started({});
+  noReset.reset();
+  noReset.autoState('enabled', 'initial', []);
+  noReset.estimatorState('unavailable', 'input_interrupted');
+  noReset.autoState('disabled', 'estimator_unavailable', []); // the interruption resets the fusion state first
+  leanCase('invalid', '13d-unavailable-disabled-without-reset', noReset, { expected: ['AUTO_RESET_MISSING'] });
+  const enabledWhile = new LeanLog();
+  enabledWhile.started({});
+  enabledWhile.reset();
+  enabledWhile.autoState('enabled', 'initial', []);
+  enabledWhile.estimatorState('unavailable', 'input_interrupted');
+  enabledWhile.autoReset('epoch_reset', []);
+  enabledWhile.autoState('enabled', 'estimator_available', []); // still unavailable
+  leanCase('invalid', '13e-enabled-while-estimator-unavailable', enabledWhile, { expected: ['AUTO_ENABLED_WHILE_BLOCKED'] });
+  const eof = new LeanLog();
+  eof.started({ replayScope: { estimate: false, calibration: true, refilter: false } });
+  eof.reset();
+  eof.autoState('enabled', 'initial', []);
+  eof.estimatorState('unavailable', 'input_interrupted'); // the file ends: the owed transition is missing
+  leanCase('invalid', '13f-calibration-replay-with-owed-transition-at-end', eof, { expected: ['CALIBRATION_REPLAY_STATE_INCOMPLETE'] });
+}
+{ // C1-3: the qualified configuration is bound to the declared inputs
+  const config = QUALIFIED_CONFIG([{ sourceId: 'undeclared-sensor', sensorType: 'accelerometer', inputPolicy: POLICY, storageStride: null }]);
+  const log = new LeanLog();
+  log.started({ qualification: log.qualified(config) }); // fingerprint matches; inputSources still names the accelerometer
+  log.reset();
+  log.estimate({ angle: null, calibration: null, t: T0 });
+  leanCase('invalid', '07d-configuration-names-an-undeclared-source', log, { expected: ['QUALIFIED_CONFIG_MISMATCH'], absent: ['QUALIFICATION_FINGERPRINT_MISMATCH'] });
+  const accIn = { sourceId: ACC, sensorType: 'accelerometer', inputPolicy: POLICY, storageStride: null };
+  const gyrIn = { sourceId: GYR, sensorType: 'gyroscope', inputPolicy: POLICY, storageStride: null };
+  const extra = new LeanLog();
+  extra.started({ qualification: extra.qualified(QUALIFIED_CONFIG([accIn, gyrIn])) }); // inputSources: accelerometer only
+  extra.reset();
+  extra.estimate({ angle: null, calibration: null, t: T0 });
+  leanCase('invalid', '07e-configuration-has-an-extra-source', extra, { expected: ['QUALIFIED_CONFIG_MISMATCH'] });
+  const missing = new LeanLog();
+  missing.started({ inputSources: [{ sourceId: ACC, stream: 'motion' }, { sourceId: GYR, stream: 'motion' }], qualification: missing.qualified(QUALIFIED_CONFIG([accIn])) });
+  missing.reset();
+  missing.estimate({ angle: null, calibration: null, t: T0 });
+  leanCase('invalid', '07f-configuration-misses-a-source', missing, { expected: ['QUALIFIED_CONFIG_MISMATCH'] });
+  const dup = new LeanLog();
+  dup.started({ qualification: dup.qualified(QUALIFIED_CONFIG([accIn, accIn])) });
+  dup.reset();
+  dup.estimate({ angle: null, calibration: null, t: T0 });
+  leanCase('invalid', '07g-configuration-repeats-a-source', dup, { expected: ['QUALIFIED_CONFIG_MISMATCH'] });
+  const dupSrc = new LeanLog();
+  dupSrc.started({ inputSources: [{ sourceId: ACC, stream: 'motion' }, { sourceId: ACC, stream: 'motion' }] });
+  dupSrc.reset();
+  dupSrc.estimate({ angle: null, calibration: null, flags: EXP, t: T0 });
+  leanCase('invalid', '07h-input-sources-repeat-a-source', dupSrc, { expected: ['INPUT_SOURCES_INVALID'] });
+}
 {
   const log = experimentalBase();
   log.estimate({ angle: null, calibration: null, flags: EXP, t: T0 });
@@ -734,6 +905,36 @@ function estimateOf(lean, motion, seq, o = {}) {
   estimateOf(lean, motion, 0, { flags: [], eligible: true });
   pairCase('invalid', '05-qualified-for-another-period', motion, lean, { expected: ['QUALIFIED_CONFIG_MISMATCH'] });
 }
+{
+  // The configuration and inputSources agree, but the motion log never declares that source.
+  const { motion } = pairBase();
+  const ghost = { sourceId: 'undeclared-sensor', sensorType: 'accelerometer', inputPolicy: POLICY, storageStride: null };
+  const lean = new LeanLog();
+  lean.started({ inputSources: [{ sourceId: 'undeclared-sensor', stream: 'motion' }], qualification: lean.qualified(QUALIFIED_CONFIG([ghost])) });
+  lean.reset([{ sourceId: 'undeclared-sensor', firstSequence: 0 }], { cursor: -1 });
+  lean.calibration('cal-1', { from: T0 });
+  pairCase('invalid', '06-qualified-source-absent-from-motion', motion, lean, { expected: ['QUALIFIED_CONFIG_MISMATCH'] });
+}
+{
+  // A qualified claim covers the whole file: session A stores everything, the configuration says time buckets.
+  const motion = new MotionLog();
+  motion.started([source(ACC, 'accelerometer')]);
+  motion.clockMap(0);
+  motion.samples_(ACC, T0, 3);
+  motion.resumed('process_restart');
+  motion.started([bucketSource()]);
+  motion.clockMap(1);
+  motion.accuracyState(ACC, 'unobserved', 'high', { atReceived: T0 + 400000 });
+  motion.anchor(ACC, { anchorUs: T0 + 400000, reason: 'resume' });
+  motion.samples_(ACC, T0 + 400000, 2, 20000, { clockMapId: 1 });
+  motion.stats(ACC, { kept: 2, first: 3, last: 4, received: 2, obs: 1 });
+  const lean = new LeanLog();
+  lean.started({ qualification: lean.qualified(QUALIFIED_CONFIG()) });
+  lean.reset([{ sourceId: ACC, firstSequence: 3 }], { cursor: -1 });
+  lean.calibration('cal-1', { from: T0 + 400000 });
+  pairCase('invalid', '07-qualified-but-one-session-declares-otherwise', motion, lean, { expected: ['QUALIFIED_CONFIG_MISMATCH'] });
+}
+
 // ------------------------------------------------------------ runs (--parent)
 
 {

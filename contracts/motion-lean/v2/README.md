@@ -68,6 +68,11 @@ v1 的歷史修正（V1-1～V1-5）見 [`../v1/README.md`](../v1/README.md) 末�
 
 同一 anchor、同一 `timeBase` 下連續兩筆保存樣本落在同一桶 → `SELECTION_BUCKET_VIOLATION`。
 
+**anchor 規則（不得靜默略過、不得被用來移動桶邊界）：**
+- 保存樣本的時間（依 `timeBase`）早於其 anchor → `SELECTION_SAMPLE_BEFORE_ANCHOR`（等於 anchor 合法）。
+- anchor 只在**有理由**時才能設定：session 開始（`reason` 為 `start` 或 `resume`）、`source_clock_state` 變更（`clock_epoch`）、`samples_dropped`（`gap`）。沒有對應的待辦理由，或 `reason` 與待辦理由不符 → `SELECTION_ANCHOR_UNJUSTIFIED`。
+- 新 anchor 不得早於同 boot、同 `timeBase` 最後一筆保存樣本的時間 → `SELECTION_ANCHOR_REGRESSION`。
+
 `samples_dropped.reason` 新增 `measurement_nonmonotonic`（重複／逆序測量；`droppedCount` 必須為已知數字）。它不是主動略過。
 
 ### 4.1 `selection_stats`
@@ -118,7 +123,7 @@ v1 的歷史修正（V1-1～V1-5）見 [`../v1/README.md`](../v1/README.md) 末�
 `{status: experimental | qualified, qualificationRef, qualifiedConfiguration, configurationFingerprint}`。
 
 - `experimental`：每個估算必須帶 `algorithm_unqualified`（`EXPERIMENTAL_ESTIMATE_UNFLAGGED`），`extremumEligible` 必為 `false`，不得有 `lean_extremum`（`EXTREMUM_IN_EXPERIMENTAL_RUN`）。
-- `qualified`：`qualificationRef` 必須非空（`QUALIFIED_WITHOUT_REF`）；`qualifiedConfiguration`（完整配置：`algorithmVersion`、`extremumPolicy`、`autoReferenceConfigFingerprint`、每個輸入的 `inputPolicy`／`storageStride`、`estimatorOutputPeriodUs`、`applicability`）的 canonical JSON SHA-256 必須等於 `configurationFingerprint`（`QUALIFICATION_FINGERPRINT_MISMATCH`），並與 `lean_started` 的 `algorithmVersion`／`extremumPolicy`／`autoReferenceConfigFingerprint`，以及（配對模式）motion 各 session 的輸入宣告逐項相符（`QUALIFIED_CONFIG_MISMATCH`）。
+- `qualified`：`qualificationRef` 必須非空（`QUALIFIED_WITHOUT_REF`）；`qualifiedConfiguration`（完整配置：`algorithmVersion`、`extremumPolicy`、`autoReferenceConfigFingerprint`、每個輸入的 `inputPolicy`／`storageStride`、`estimatorOutputPeriodUs`、`applicability`）的 canonical JSON SHA-256 必須等於 `configurationFingerprint`（`QUALIFICATION_FINGERPRINT_MISMATCH`），並與 `lean_started` 的 `algorithmVersion`／`extremumPolicy`／`autoReferenceConfigFingerprint` 相符。**配置的輸入來源集合必須與 `lean_started.inputSources` 完全相同**（不可缺少、額外或重複，`QUALIFIED_CONFIG_MISMATCH`）；`inputSources` 本身不得重複（`INPUT_SOURCES_INVALID`）。配對模式下，配置的每個輸入在 motion 的**每個 session** 都必須宣告為可用且與配置完全相同；查不到宣告就是不符，不是略過（`QUALIFIED_CONFIG_MISMATCH`）。
 - **檔案中的 `qualified` 只是寫入端的宣告，`qualificationRef` 的存在不是精度證明**（工程規則 §2.8）。驗證器不查私有證據，因此不輸出「已核驗」；本機核驗註冊表（`--qualification-registry`）留待 C2。
 
 ### 7.3 污染傳遞（含 v1）
@@ -141,7 +146,8 @@ v1 的歷史修正（V1-1～V1-5）見 [`../v1/README.md`](../v1/README.md) 末�
 **`auto_reference_state`**：`{state: enabled | suspended | disabled, reason, afterInputs}`。
 
 1. **初始狀態必記**：每個 `lean_started` 與每個 `recording_resumed` 之後，在第一筆 `lean_hint` 之前必須有一筆（`AUTO_STATE_MISSING`）。
-2. **所有有效的 `enabled`／`suspended`／`disabled` 轉換均保存**；唯一可省略的是可由版本化演算法與完整輸入重算的內部條件（`pendingAutomatic`、紀元起點後一秒、候選容量飽和、`delivered`）。`enabled` 是必要而非充分條件：`updateFix`／`add` 仍分別套用演算法的呼叫條件。
+2. **所有有效的 `enabled`／`suspended`／`disabled` 轉換均保存**（包含估算器不可用造成的轉換：`estimator_state(unavailable)` 發生在 `enabled` 期間，必須接著儲存 `disabled(estimator_unavailable)`，缺 → 下一筆 hint 報 `AUTO_STATE_TRANSITION_MISSING`；估算器中斷會重設融合狀態，因此轉換前須有 `auto_reference_reset`，缺 → `AUTO_RESET_MISSING`）；唯一可省略的是可由版本化演算法與完整輸入重算的內部條件（`pendingAutomatic`、紀元起點後一秒、候選容量飽和、`delivered`）。`enabled` 是必要而非充分條件：`updateFix`／`add` 仍分別套用演算法的呼叫條件。
+3. **hint 的消費處會檢查檔內已知的可用性**：`estimator_state` 為 `unavailable` 期間出現 `lean_hint` → `HINT_WHILE_ESTIMATOR_UNAVAILABLE`，不因較早的 `enabled` 而接受。這類違規同樣令 `replayScope.calibration = true` 的宣告失敗。
 3. `suspended` ＝ 外部（使用者手動指令）暫停；`disabled` ＝ 條件不成立（現行校準存在、估算不可用、實驗輸入）。`suspended` 與 `disabled` 期間不得出現 `lean_hint`（`HINT_WHILE_NOT_ENABLED`）；現行校準存在期間不得出現 `lean_hint`（`HINT_WHILE_CALIBRATED`）。
 4. **與 reset 的次序**（同一個 `afterInputs` 邊界內依檔案順序處理）：進入手動指令：先 `auto_reference_reset` 再 `suspended`（缺 reset → `AUTO_RESET_MISSING`）。離開 `suspended`：先 reset 再記**取消後的實際狀態**（缺 reset → `AUTO_RESUME_WITHOUT_RESET`）。`cancel` **只解除手動暫停**：若現行校準或估算不可用等條件仍成立，必須記 `disabled`，不得記 `enabled`（`AUTO_ENABLED_WHILE_BLOCKED`；驗證器只能檢查「現行校準」與「估算不可用」，`experimental` 輸入在檔案中沒有可核對的來源）。
 5. `afterInputs` 每來源非遞減（`HINT_CURSOR_REGRESSION`）；配對模式下不得超過 motion 檔該來源的最大序號（`HINT_CURSOR_AHEAD`）。
@@ -154,7 +160,7 @@ v1 的歷史修正（V1-1～V1-5）見 [`../v1/README.md`](../v1/README.md) 末�
 
 warning：`UNSETTLED_SELECTION_WINDOW`。
 
-error（新增）：`UNSUPPORTED_SCHEMA_VERSION`、`SCHEMA_VERSION_MIXED`、`STRIDE_POLICY_CONFLICT`、`POLICY_REDECLARED`、`SELECTION_WITHOUT_POLICY`、`SELECTION_ANCHOR_MISSING`、`ANCHOR_TIMEBASE_MISMATCH`、`SELECTION_BUCKET_VIOLATION`、`SELECTION_STATS_MISMATCH`、`ACCURACY_STATE_CHAIN`、`ACCURACY_CHANGE_UNRECORDED`、`CONTROL_SEQUENCE_GAP`、`CONTROL_SEQUENCE_REGRESSION`、`CONTROL_CURSOR_AHEAD`、`CONTROL_CURSOR_MISMATCH`、`SOURCE_REF_SPANS_SESSIONS`、`RUN_ID_MISMATCH`、`DERIVED_RUN_PARENT_MISMATCH`、`REPLAY_SCOPE_MISMATCH`、`REFILTER_SPEC_UNRESOLVABLE`、`EXPERIMENTAL_ESTIMATE_UNFLAGGED`、`EXTREMUM_IN_EXPERIMENTAL_RUN`、`QUALIFIED_WITHOUT_REF`、`QUALIFICATION_FINGERPRINT_MISMATCH`、`QUALIFIED_CONFIG_MISMATCH`、`ESTIMATE_CALIBRATION_TAINT_DROPPED`、`CARRIED_OVER_TAINT_DROPPED`、`AUTO_STATE_MISSING`、`AUTO_RESET_MISSING`、`AUTO_RESUME_WITHOUT_RESET`、`AUTO_ENABLED_WHILE_BLOCKED`、`HINT_WHILE_NOT_ENABLED`、`HINT_WHILE_CALIBRATED`、`HINT_CURSOR_REGRESSION`、`HINT_CURSOR_AHEAD`、`HINT_RANGE_INCOMPLETE`、`HINT_AFTER_CALIBRATION`、`CALIBRATION_REPLAY_STATE_INCOMPLETE`。其餘沿用 v1 §13。
+error（新增）：`UNSUPPORTED_SCHEMA_VERSION`、`SCHEMA_VERSION_MIXED`、`STRIDE_POLICY_CONFLICT`、`POLICY_REDECLARED`、`SELECTION_WITHOUT_POLICY`、`SELECTION_ANCHOR_MISSING`、`ANCHOR_TIMEBASE_MISMATCH`、`SELECTION_BUCKET_VIOLATION`、`SELECTION_STATS_MISMATCH`、`ACCURACY_STATE_CHAIN`、`ACCURACY_CHANGE_UNRECORDED`、`CONTROL_SEQUENCE_GAP`、`CONTROL_SEQUENCE_REGRESSION`、`CONTROL_CURSOR_AHEAD`、`CONTROL_CURSOR_MISMATCH`、`SOURCE_REF_SPANS_SESSIONS`、`RUN_ID_MISMATCH`、`DERIVED_RUN_PARENT_MISMATCH`、`REPLAY_SCOPE_MISMATCH`、`REFILTER_SPEC_UNRESOLVABLE`、`EXPERIMENTAL_ESTIMATE_UNFLAGGED`、`EXTREMUM_IN_EXPERIMENTAL_RUN`、`QUALIFIED_WITHOUT_REF`、`QUALIFICATION_FINGERPRINT_MISMATCH`、`QUALIFIED_CONFIG_MISMATCH`、`ESTIMATE_CALIBRATION_TAINT_DROPPED`、`CARRIED_OVER_TAINT_DROPPED`、`SELECTION_SAMPLE_BEFORE_ANCHOR`、`SELECTION_ANCHOR_UNJUSTIFIED`、`SELECTION_ANCHOR_REGRESSION`、`HINT_WHILE_ESTIMATOR_UNAVAILABLE`、`AUTO_STATE_TRANSITION_MISSING`、`INPUT_SOURCES_INVALID`、`AUTO_STATE_MISSING`、`AUTO_RESET_MISSING`、`AUTO_RESUME_WITHOUT_RESET`、`AUTO_ENABLED_WHILE_BLOCKED`、`HINT_WHILE_NOT_ENABLED`、`HINT_WHILE_CALIBRATED`、`HINT_CURSOR_REGRESSION`、`HINT_CURSOR_AHEAD`、`HINT_RANGE_INCOMPLETE`、`HINT_AFTER_CALIBRATION`、`CALIBRATION_REPLAY_STATE_INCOMPLETE`。其餘沿用 v1 §13。
 
 ## 10. 驗證與 fixtures
 

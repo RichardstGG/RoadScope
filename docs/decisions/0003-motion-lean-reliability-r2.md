@@ -585,3 +585,5 @@ C1 的規範本文是 [`contracts/motion-lean/v2/README.md`](../../contracts/mot
 7. **`auto_reference_reset.reason`** 列為 `session｜boot｜manual_command｜epoch_reset｜explicit`；`auto_reference_state` 的 reason 清單與 §D.1a 相同。
 8. 驗證器只能核對 `AUTO_ENABLED_WHILE_BLOCKED` 的「現行校準」與「估算不可用」兩種阻擋；`experimental` 輸入在檔案中沒有可核對的來源。
 9. **v1 回歸 R-01～R-06 的舊工具欄是實跑結果**（`7474933` 凍結副本，記於各案 `old-tool.json`）：R-01 在 session B 的引用處誤報（false positive）；R-02a 在 session A 的引用處報（錯誤 session）；R-02b 在 B 報（位置碰巧正確）；R-02c 在 A 誤報；R-03～R-06 舊工具只有 `UNKNOWN_QUALITY_FLAG` 警告。與 §F 的推導一致。
+10. **C1 復核後修正（Codex `76bf403`）**：未來／過早 anchor 不再被略過（`SELECTION_SAMPLE_BEFORE_ANCHOR`），anchor 必須有待辦理由且不得倒退（`SELECTION_ANCHOR_UNJUSTIFIED`、`SELECTION_ANCHOR_REGRESSION`）；hint 消費處檢查 `estimator_state`（`HINT_WHILE_ESTIMATOR_UNAVAILABLE`），估算器中斷造成的 `disabled` 轉換為必存（`AUTO_STATE_TRANSITION_MISSING`），且轉換前須有 reset；資格配置的輸入集合須等於 `inputSources`，配對時每個 session 都須宣告且相同。新增錯誤碼 `INPUT_SOURCES_INVALID`。「估算器中斷時 pipeline 重設自動參考」是依 `LeanPipeline.kt` 的 `automatic.reset()` 推得，**請 Codex 在寫入端確認**。
+

@@ -460,8 +460,12 @@ function newSelection(declaration) {
     policy: declaration.inputPolicy ?? null,
     anchor: null,
     needAnchor: true,
+    // Why an anchor is owed. An anchor that nothing asks for is unjustified: it could move bucket boundaries
+    // to let several samples through. 'session' accepts start|resume, the others their own reason.
+    causes: new Set(['session']),
     anchorMissingReported: false,
     lastBucket: null,
+    lastStored: null, // {boot, timeBase, t} of the last stored sample
     acc: 'unobserved',
     windowIndex: 0,
     kept: 0,
@@ -516,7 +520,10 @@ function applyMotionEvent(state, spaceOf, record, line, add, model) {
       pushTo(model.breaks, record.sourceId, { boot: record.deviceBootId, nextSeq: spaceOf(record.sourceId).maxSequence + 1 });
       pushTo(state.cover, record.sourceId, { boot: record.deviceBootId, from: 0, to: record.occurredMonotonicUs });
       const sel = state.sel.get(record.sourceId);
-      if (V === 2 && sel?.policy) sel.needAnchor = true;
+      if (V === 2 && sel?.policy) {
+        sel.needAnchor = true;
+        sel.causes.add('clock_epoch');
+      }
       break;
     }
     case 'clock_map': {
@@ -538,6 +545,7 @@ function applyMotionEvent(state, spaceOf, record, line, add, model) {
       const sel = state.sel.get(record.sourceId);
       if (V === 2 && sel?.policy) {
         sel.needAnchor = true;
+        sel.causes.add('gap');
         if (record.reason === 'buffer_full') sel.bufferDropped += record.droppedCount;
       }
       break;
@@ -619,7 +627,20 @@ function applySelectionAnchor(state, record, line, add) {
   if (record.timeBase !== expected) {
     add('ANCHOR_TIMEBASE_MISMATCH', line, `${record.sourceId} clock is ${state.clockState.get(record.sourceId)}: timeBase must be ${expected}`);
   }
+  const justified =
+    (sel.causes.has('session') && (record.reason === 'start' || record.reason === 'resume')) ||
+    (sel.causes.has('clock_epoch') && record.reason === 'clock_epoch') ||
+    (sel.causes.has('gap') && record.reason === 'gap');
+  if (!justified) {
+    add('SELECTION_ANCHOR_UNJUSTIFIED', line, `${record.sourceId} anchor (reason ${record.reason}) with nothing owed (pending: ${[...sel.causes].join(', ') || 'none'})`);
+  }
+  // A new anchor may not reach back before the last stored sample of the same boot and time base.
+  const last = sel.lastStored;
+  if (last && last.boot === record.deviceBootId && last.timeBase === record.timeBase && record.anchorUs < last.t) {
+    add('SELECTION_ANCHOR_REGRESSION', line, `${record.sourceId} anchorUs ${record.anchorUs} precedes the last stored sample at ${last.t}`);
+  }
   sel.anchor = { timeBase: record.timeBase, anchorUs: record.anchorUs };
+  sel.causes = new Set();
   sel.needAnchor = false;
   sel.anchorMissingReported = false;
   sel.lastBucket = null;
@@ -786,12 +807,18 @@ function checkSelection(state, record, line, add) {
       }
     } else {
       const t = sel.anchor.timeBase === 'measurement' ? record.measurementMonotonicUs : record.receivedMonotonicUs;
-      if (t !== null && t >= sel.anchor.anchorUs) {
-        const bucket = Math.floor((t - sel.anchor.anchorUs) / sel.policy.periodUs);
-        if (sel.lastBucket !== null && bucket === sel.lastBucket) {
-          add('SELECTION_BUCKET_VIOLATION', line, `${record.sourceId} stored two samples in bucket ${bucket} (periodUs ${sel.policy.periodUs})`);
+      if (t !== null) {
+        if (t < sel.anchor.anchorUs) {
+          // Never skipped silently: a sample before its anchor cannot be placed in any bucket.
+          add('SELECTION_SAMPLE_BEFORE_ANCHOR', line, `${record.sourceId} sample at ${t} precedes its anchor ${sel.anchor.anchorUs}`);
+        } else {
+          const bucket = Math.floor((t - sel.anchor.anchorUs) / sel.policy.periodUs);
+          if (sel.lastBucket !== null && bucket === sel.lastBucket) {
+            add('SELECTION_BUCKET_VIOLATION', line, `${record.sourceId} stored two samples in bucket ${bucket} (periodUs ${sel.policy.periodUs})`);
+          }
+          sel.lastBucket = bucket;
         }
-        sel.lastBucket = bucket;
+        sel.lastStored = { boot: record.deviceBootId, timeBase: sel.anchor.timeBase, t };
       }
     }
     sel.kept += 1;
@@ -857,7 +884,7 @@ export function validateLeanLog(text, { motion = null, parent = null } = {}) {
     experimental: false,
     startedRecord: null,
     afterCursor: new Map(), // sourceId -> highest afterInputs sequence seen on hints / auto events
-    auto: { current: null, resetSinceState: false, hintFirstSinceReset: null, hintLast: -1, sawState: false, violation: false },
+    auto: { current: null, resetSinceState: false, hintFirstSinceReset: null, hintLast: -1, sawState: false, violation: false, owed: null },
     lastLine: 1,
   };
   let recordCount = 0;
@@ -940,21 +967,25 @@ function checkRunId(state, record, line, add) {
 function finishLeanV2(state, add, motion, parent) {
   const auto = state.auto;
   const scope = state.startedRecord?.replayScope;
-  if (scope?.calibration && (auto.violation || !auto.sawState || auto.current === null)) {
+  if (scope?.calibration && (auto.violation || auto.owed || !auto.sawState || auto.current === null)) {
     add('CALIBRATION_REPLAY_STATE_INCOMPLETE', state.lastLine, 'replayScope.calibration is true but the auto_reference_state history is missing or inconsistent');
   }
   const config = state.startedRecord?.qualification?.qualifiedConfiguration;
   if (motion && config && state.startedRecord.qualification.status === 'qualified') {
+    // A qualified claim binds the whole file: every configured input must be declared available, and
+    // identical to the configuration, in every motion session. Absence is a mismatch, never a skip.
+    const reported = new Set();
     for (const input of config.inputs) {
-      for (const decls of motion.model.sessions) {
+      motion.model.sessions.forEach((decls, session) => {
         const decl = decls.get(input.sourceId);
-        if (!decl) continue;
-        const actual = { sourceId: decl.sourceId, sensorType: decl.sensorType, inputPolicy: decl.inputPolicy ?? null, storageStride: decl.storageStride };
-        if (canonicalJson(actual) !== canonicalJson(input)) {
-          add('QUALIFIED_CONFIG_MISMATCH', state.startedRecord.line ?? 1, `qualifiedConfiguration input ${input.sourceId} differs from a motion session declaration`);
-          break;
+        const actual = decl?.available
+          ? { sourceId: decl.sourceId, sensorType: decl.sensorType, inputPolicy: decl.inputPolicy ?? null, storageStride: decl.storageStride }
+          : null;
+        if ((actual === null || canonicalJson(actual) !== canonicalJson(input)) && !reported.has(input.sourceId)) {
+          reported.add(input.sourceId);
+          add('QUALIFIED_CONFIG_MISMATCH', state.startedRecord.line ?? 1, `qualifiedConfiguration input ${input.sourceId} is ${actual === null ? 'not declared available' : 'declared differently'} in motion session ${session}`);
         }
-      }
+      });
     }
   }
   const parentInfo = state.startedRecord?.derivesFrom;
@@ -1039,6 +1070,8 @@ function applyLeanEvent(state, spaceOf, record, line, add, motion) {
   if (record.eventType === 'estimator_state') {
     if (record.state === 'unavailable') {
       state.unavailable = true;
+      // The estimator interruption blocks the automatic reference: a transition to disabled is owed.
+      if (V === 2 && state.auto.current === 'enabled') state.auto.owed = 'estimator_unavailable';
     } else if (state.unavailable) {
       // Coming back needs a fresh epoch: the fusion state did not survive.
       state.unavailable = false;
@@ -1049,7 +1082,8 @@ function applyLeanEvent(state, spaceOf, record, line, add, motion) {
     if (V === 2) {
       for (const [source, next] of Object.entries(record.resumedSequences)) spaceOf(source).expectedNext = next;
       if (record.eventType === 'recording_resumed') {
-        if (state.startedRecord?.replayScope?.calibration && state.auto.current === null) state.auto.violation = true;
+        if (state.startedRecord?.replayScope?.calibration && (state.auto.current === null || state.auto.owed)) state.auto.violation = true;
+        state.auto.owed = null;
         state.auto.current = null; // the pipeline is rebuilt: the initial state must be stored again
         state.auto.resetSinceState = false;
       }
@@ -1071,7 +1105,9 @@ function applyLeanEvent(state, spaceOf, record, line, add, motion) {
 
 function applyLeanStartedV2(state, record, line, add) {
   state.startedRecord = { ...record, line };
-  state.auto = { current: null, resetSinceState: false, hintFirstSinceReset: null, hintLast: state.auto.hintLast, sawState: state.auto.sawState, violation: state.auto.violation };
+  state.auto = { current: null, resetSinceState: false, hintFirstSinceReset: null, hintLast: state.auto.hintLast, sawState: state.auto.sawState, violation: state.auto.violation, owed: null };
+  const ids = record.inputSources.map((i) => i.sourceId);
+  if (new Set(ids).size !== ids.length) add('INPUT_SOURCES_INVALID', line, 'inputSources names a source more than once');
   if (record.replayable !== record.replayScope.estimate) {
     add('REPLAY_SCOPE_MISMATCH', line, `replayable ${record.replayable} != replayScope.estimate ${record.replayScope.estimate}`);
   }
@@ -1090,6 +1126,12 @@ function applyLeanStartedV2(state, record, line, add) {
         add('QUALIFICATION_FINGERPRINT_MISMATCH', line, 'configurationFingerprint is not the SHA-256 of the canonical qualifiedConfiguration');
       }
       const c = q.qualifiedConfiguration;
+      const declared = record.inputSources.map((i) => i.sourceId);
+      const configured = c.inputs.map((i) => i.sourceId);
+      const sameSet = new Set(declared).size === new Set(configured).size && declared.every((id) => configured.includes(id));
+      if (new Set(configured).size !== configured.length || !sameSet) {
+        add('QUALIFIED_CONFIG_MISMATCH', line, `qualifiedConfiguration inputs [${configured.join(', ')}] differ from lean_started inputSources [${declared.join(', ')}] (missing, extra or duplicate source)`);
+      }
       if (
         c.algorithmVersion !== record.algorithmVersion ||
         canonicalJson(c.extremumPolicy) !== canonicalJson(record.extremumPolicy) ||
@@ -1147,6 +1189,12 @@ function applyAutoState(state, record, line, add, motion) {
   if (record.state === 'enabled' && (calibrationActive(state, record.deviceBootId) || state.unavailable)) {
     fail('AUTO_ENABLED_WHILE_BLOCKED', `enabled while ${state.unavailable ? 'the estimator is unavailable' : 'a calibration is in force'}`);
   }
+  // An estimator interruption resets the fusion state, so the reset precedes the disabled transition.
+  if (record.state === 'disabled' && record.reason === 'estimator_unavailable' && !auto.resetSinceState) {
+    fail('AUTO_RESET_MISSING', 'disabled(estimator_unavailable) must be preceded by auto_reference_reset');
+  }
+  if (record.state !== 'enabled') auto.owed = null; // the owed transition is stored
+  else if (!state.unavailable) auto.owed = null;
   auto.current = record.state;
   auto.resetSinceState = false;
   auto.sawState = true;
@@ -1155,6 +1203,15 @@ function applyAutoState(state, record, line, add, motion) {
 function applyHint(state, record, line, add, motion) {
   checkAfterInputs(state, record, line, add, motion);
   const auto = state.auto;
+  if (state.unavailable) {
+    // The file itself says the estimator is unavailable: an older `enabled` cannot make this hint acceptable.
+    auto.violation = true;
+    add('HINT_WHILE_ESTIMATOR_UNAVAILABLE', line, 'lean_hint while estimator_state is unavailable');
+  }
+  if (auto.owed) {
+    auto.violation = true;
+    add('AUTO_STATE_TRANSITION_MISSING', line, `lean_hint after ${auto.owed} without the owed auto_reference_state transition`);
+  }
   if (auto.current === null) {
     auto.violation = true;
     add('AUTO_STATE_MISSING', line, 'lean_hint before any auto_reference_state since lean_started / recording_resumed');
