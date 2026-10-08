@@ -2,14 +2,15 @@
   "name": "@roadscope/contract-tools",
   "version": "0.1.0",
   "private": true,
-  "description": "Validators for RoadScope shared contracts. Schema is the single source of truth; no model generation (see docs/decisions/0001-location-log-format.md).",
+  "description": "Validators for RoadScope shared contracts (location-log, motion/lean). Schema is the single source of truth; no model generation (see docs/decisions/0001-location-log-format.md).",
   "type": "module",
   "engines": {
     "node": ">=22"
   },
   "scripts": {
     "validate": "node validate-location-log.mjs",
-    "test": "node test/run-fixtures.mjs"
+    "test": "node test/run-fixtures.mjs && node test/run-motion-lean-fixtures.mjs",
+    "validate:motion-lean": "node validate-motion-lean.mjs"
   },
   "dependencies": {
     "ajv": "8.17.1"

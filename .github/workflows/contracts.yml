@@ -37,3 +37,11 @@ jobs:
       - name: validate valid fixtures
         run: node validate-location-log.mjs ../../testdata/contracts/location-log/v1/valid/*.ndjson
         working-directory: contracts/tools
+      - name: validate valid motion/lean fixtures
+        run: |
+          node validate-motion-lean.mjs ../../testdata/contracts/motion-lean/v1/motion/valid/*.ndjson
+          node validate-motion-lean.mjs ../../testdata/contracts/motion-lean/v1/lean/valid/*.ndjson
+          for dir in ../../testdata/contracts/motion-lean/v1/pairs/valid/*/; do
+            node validate-motion-lean.mjs --motion "$dir/motion.ndjson" "$dir/motion.ndjson" "$dir/lean.ndjson"
+          done
+        working-directory: contracts/tools
