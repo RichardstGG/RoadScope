@@ -5,6 +5,7 @@
 影響路徑：`contracts/motion-lean/`、`contracts/tools/`、`testdata/contracts/motion-lean/`（皆為契約擁有者路徑；本文件不要求任何人改 `device_bridge`、`apps/mobile`、`mobile_data`、`timing_core`）。
 相關：0002（v1）、手機端提案 `packages/device_bridge/RECORDING_RELIABILITY_DESIGN.md`（D1）、`CONTRACT_FEASIBILITY_REVIEW.md`（F1，PR #11 `13b68a3`）。
 契約基準：PR #10 `7474933`。本文件取代上一輪口頭回覆中的 revision 方案（見 §A）。
+第二版（回應 F2，PR #11 `ffdb350`）：補 §A.3 相容影響、§B.5 policy／stride 單一解釋、§D.1a 自動參考控制狀態、§F 案例與回歸。其餘 A～E 已被 Codex 接受，未重開。
 
 證據類型一律標註：`static validation`＝讀原始碼／schema；`untested`＝尚無實測。本文件**沒有任何**效能、精度、耗時實測。
 
@@ -46,21 +47,41 @@
 
 ### A.3 v1 有意變更完整清單（回歸測試必須逐項對應）
 
+分成兩類，不混在一起：**檔案語義**（同一個檔案在新舊工具下判定可能不同）與**工具執行**（與檔案內容無關的執行結果）。
+
+**甲、檔案語義（對 v1 檔）**
+
 | # | 變更 | 對 v1 檔的影響 | 方向 |
 |---|---|---|---|
-| V1-1 | 兩旗標列為已知旗標 | 原本的 `UNKNOWN_QUALITY_FLAG` 警告消失 | 放寬（警告） |
-| V1-2 | 兩旗標列為阻擋旗標 | `extremumEligible=true` 又帶該旗標 → `EXTREMUM_ELIGIBLE_BLOCKED` error | 收緊（error） |
-| V1-3 | 宣告改按 session 解析，取代 `Math.max(storageStride)`（`validate-motion-lean.mjs:391`） | 多 session 檔：早期 session 的 `REPLAY_STRIDE_DROPS_INPUTS` 可能**新增或消失** | **雙向**，必有回歸案例 |
-| V1-4 | CLI 新增輸出欄位與 exit code（見 §E.3）；v1 檔不產生新錯誤碼 | 僅 v2 使用；v1 檔不產生 | 無 |
+| V1-1 | `sensor_accuracy_unreliable`、`calibration_input_unverified` 列為已知旗標 | 原本的 `UNKNOWN_QUALITY_FLAG` 警告消失 | 放寬（警告） |
+| V1-2 | 兩旗標列為阻擋旗標 | 估算 `extremumEligible=true` 又帶任一旗標 → `EXTREMUM_ELIGIBLE_BLOCKED` error | 收緊 |
+| V1-3 | 宣告改按 session 解析，取代 `Math.max(storageStride)`（`validate-motion-lean.mjs:391`） | 多 session 檔的 `REPLAY_STRIDE_DROPS_INPUTS`：**報告位置與是否報告都可能改變**（見 §F 回歸，需核對實際 error 與所屬 session，不預設舊工具漏報） | 雙向 |
+| V1-4 | **污染傳遞**（§D.3），適用 v1 | 校準 `qualityFlags` 含 `sensor_accuracy_unreliable` 或 `calibration_input_unverified`，而使用它的估算**沒有**帶 `calibration_input_unverified` → `ESTIMATE_CALIBRATION_TAINT_DROPPED` error。**不限於 `extremumEligible=true`**：eligible=false 但漏傳旗標同樣違規 | 收緊 |
+| V1-5 | `carried_over` 校準必須保留來源校準的污染旗標 | 丟失 → `CARRIED_OVER_TAINT_DROPPED` error（v1 保留 `carried_over` 為合法值，PR #11 runtime 不使用） | 收緊 |
 
-上輪我寫「v1 新增 error 只有兩旗標」與 V1-3 互相矛盾，更正如上。
+- `sensor_accuracy_unknown` **只屬 v2**。v1 的污染集合只有上述兩旗標；v1 檔出現 `sensor_accuracy_unknown` 仍按舊規則為未知旗標（`UNKNOWN_QUALITY_FLAG` 警告），不回溯。
+- V1-4／V1-5 是在 PR #10 尚未合併時對 v1 做的**歷史收緊**，不是新增欄位。已存在的 v1 檔若違反，結果是該檔「不符合修正後規則」，不會被改寫。
+- Codex 先前的私有專項（估算自身兩旗標與 `extremumEligible`）**只覆蓋 V1-2**，不涵蓋 V1-4／V1-5。V1-4／V1-5 的正式結果要等 C2 驗證器存在後才能在本機檢查；在那之前這兩項對私有檔是 **untested**。
+
+**乙、工具執行（與檔案語義無關，適用任何 schemaVersion）**
+
+| # | 變更 | 說明 |
+|---|---|---|
+| X-1 | 新增 exit code 3（容量／IO／環境不支援／watchdog 中止）、130（取消） | v1 檔同樣可能遇到。執行**未完成**時輸出「未完成」並以 3／130 結束，**不得**報 PASS；已發現的 findings 仍輸出 |
+| X-2 | 新增 exit code 4（`UNSUPPORTED_SCHEMA_VERSION`） | 只在遇到 >2 的版本；v1、v2 不會觸發 |
+| X-3 | 0／1／2 的語義不變 | 完成驗證且無 error → 0；有 error → 1；用法錯誤 → 2 |
+| X-4 | `--json`、文字輸出的既有結構不變 | 新增欄位只在使用新選用旗標時出現 |
+
+舊版 A.3 的 V1-4（「新 exit 僅 v2 使用」）不成立，已刪除並改為本表 X-1～X-4。
+
+上輪我寫「v1 新增 error 只有兩旗標」與 V1-3 互相矛盾，更正如上；本版再補 V1-4／V1-5。
 
 ### A.4 相容矩陣
 
 | | v1 檔 | v2 檔 | 未知 `schemaVersion`（≥3） |
 |---|---|---|---|
 | PR #10 舊工具（`7474933`） | 照舊 | **拒絕**（`SCHEMA_INVALID`） | 拒絕（`SCHEMA_INVALID`） |
-| 新工具（C2 以後） | 讀、驗證；含 V1-1～V1-3 | 讀、驗證 | **`UNSUPPORTED_SCHEMA_VERSION`，exit 4，不報 PASS** |
+| 新工具（C2 以後） | 讀、驗證；含 V1-1～V1-5 | 讀、驗證 | **`UNSUPPORTED_SCHEMA_VERSION`，exit 4，不報 PASS** |
 | v1 寫入端（目前 PR #11 runtime） | 寫 | 不寫 | — |
 | v2 寫入端 | **不得續錄或追加**（封存） | 寫 | — |
 | location-log 驗證器 | 不受影響；motion／lean 行屬未知 `recordType`，依 location-log §4 保留 | 同左 | 同左 |
@@ -123,8 +144,20 @@ v2 寫入端遇到 v1 的 motion／lean 檔：**不追加**。該 recording 的 
   "unverifiedRule": "received_time_bucket"
 }
 ```
-- `storageStride` 在 v2 改為 `integer ≥ 1 | null`；`null` 只允許與 `inputPolicy` 並存（`STRIDE_POLICY_CONFLICT`）。
-- 缺 `inputPolicy` ＝ 全部保存（等同 stride 1）。
+- **v2 的 `inputPolicy` 與 `storageStride` 只有兩種合法組合**，其餘一律 `STRIDE_POLICY_CONFLICT`：
+
+| `inputPolicy` | `storageStride` | 結果 | 語義 |
+|---|---|---|---|
+| 缺省 | `1` | 合法 | 全存（非 lossy） |
+| `kind = time_bucket_first`、`lossy = true` | `null` | 合法 | 時間桶選樣（lossy） |
+| 缺省 | `≥ 2` | `STRIDE_POLICY_CONFLICT` | v2 不保留型號除數 |
+| 缺省 | `null` | `STRIDE_POLICY_CONFLICT` | |
+| 存在 | `1` 或 `≥ 2` | `STRIDE_POLICY_CONFLICT` | |
+
+- v2 schema：`storageStride ∈ {1, null}`（整數 ≥2 在 v2 為 `SCHEMA_INVALID`，與衝突碼的區別見 §F）；`inputPolicy.kind` 只允許 `time_bucket_first`，`lossy` 必為 `true`；其他 kind 為 `SCHEMA_INVALID`（新增 kind 需契約 PR）。
+- 整數 stride（>1）只存在於 v1，不為已決定移除的型號除數增加 v2 模式。
+- 「非 lossy」的判定在 v2 只有一種：缺 policy 且 stride = 1（用於 §C.6 `refilter`）。
+- `available: false` 的來源既無 policy 也無 stride（沿用現行 schema）。
 
 **`selection_anchor`**（`motion_event`）：`{sourceId, policyVersion, timeBase: "measurement" | "received", anchorUs, reason: start | clock_epoch | gap | resume, controlSequence}`。
 - 時鐘 `unverified`／`unavailable`：`timeBase = received`，以 `receivedMonotonicUs` 分桶限制診斷量；樣本 `measurementMonotonicUs` 維持 null，**不得**進估算。這是明確的第二分支，不用假的測量 anchor。
@@ -296,20 +329,44 @@ raw 檔出現完整損壞行（`NOT_JSON`、重複／衝突序號、身分異常
 - `lean_calibration.evidence`（`auto_straight`）新增 `hintRange: {firstHintSequence, lastHintSequence}`：必須涵蓋**自最近一次 `auto_reference_reset` 以來**的全部 hint，序號連續（`HINT_RANGE_INCOMPLETE`）；校準行不得早於其所列 hint（`HINT_AFTER_CALIBRATION`）。
 - **`--location <log>`**（選用）：核對 `gpsRef` 所指樣本的 `deviceBootId`、測量時間、速度、精度與 `fix` 一致，不一致 `HINT_GPS_MISMATCH`。未提供時輸出 `crossFileChecks.location: "not_run"`，hint 視為「未與 GPS 交叉驗證」，**不報告為已驗證**。
 
+### D.1a 自動參考的控制狀態（啟用／暫停）
+
+來源：`LeanPipeline.kt`（`static validation`，Codex 路徑，只讀）。`rideFix` 只有在 `available`、非 `experimental`、無 mount、無現行 `calibrationId`、且 `command == "idle"` 時才呼叫 `updateFix`；`automatic.add` 另受 `pendingAutomatic` 及紀元起點後一秒的條件限制；`control(upright|left)` 會 `reset` 並進入手動收集，`cancel` 也 `reset` 但回到 `idle`。因此只保存 hint 與 reset，**不足以判斷之後是否該呼叫 `add`**；尚未完成的手動動作也沒有 `lean_calibration` 行可供推知。
+
+新增 `lean_event.auto_reference_state`（`sourceId` 不佔序號，同其他事件）：
+
+```json
+{"eventType":"auto_reference_state","state":"enabled|suspended|disabled",
+ "reason":"initial|recovery|manual_command_started|manual_command_cancelled|manual_calibration_activated|calibration_present|calibration_cleared|estimator_unavailable|estimator_available|experimental_input|experimental_cleared|session_stop",
+ "afterInputs":[{"sourceId":"…","sequence":0}]}
+```
+
+規則：
+1. **初始狀態必記**：每個 `lean_started` 之後、每個 `recording_resumed` 之後，在第一筆 `lean_hint` 之前，必須有一筆 `auto_reference_state`（`reason = initial` 或 `recovery`）。缺 → `AUTO_STATE_MISSING`。
+2. **每次狀態變更必記**，帶 `afterInputs`（與 `lean_hint.afterInputs` 同語義：此刻自動參考已消費的各輸入最後序號；每來源非遞減、不超過檔內已存在最大值）。
+3. **語義**：`enabled` ＝ 可呼叫 `updateFix`／`add`；`suspended` ＝ 外部（使用者手動指令）暫停；`disabled` ＝ 因條件不成立而停用（現行校準存在、估算不可用、實驗輸入）。`suspended` 與 `disabled` 期間**不得**出現 `lean_hint`（`HINT_WHILE_NOT_ENABLED`），也不累積候選。
+4. **與 reset 的次序**（同一個 `afterInputs` 邊界內，依 lean 檔出現順序處理）：
+   - 進入 `suspended`（手動指令開始）：先 `auto_reference_reset`，再 `auto_reference_state(suspended, manual_command_started)`。
+   - 離開 `suspended` 回 `enabled`（取消）：先 `auto_reference_reset`，再 `auto_reference_state(enabled, manual_command_cancelled)`。缺少 reset 就恢復 → `AUTO_RESUME_WITHOUT_RESET`。
+   - 恢復邊界之後的輸入才開始重新累積；暫停期間的輸入不屬於候選。
+5. **可由版本化演算法與完整輸入重算的條件不重複保存**：`pendingAutomatic`、紀元起點後一秒、候選容量飽和、`delivered` 等。**所有外部開關必須可判定**——手動指令的開始／取消／完成是外部開關，必須有狀態事件；其餘條件（`available`、現行校準、實驗輸入）可由 `estimator_state`、`lean_calibration`／`calibration_invalidated`、準確度狀態推得，寫入端可省略對應狀態事件，但驗證器會單檔檢查「現行校準存在期間出現 hint」→ `HINT_WHILE_CALIBRATED`。若寫入端無法判定某個外部條件，`replayScope.calibration` 必須為 false。
+6. **不擴張範圍**：手動校準結果仍是記錄輸入，不要求保存整套手動證據，也不重算手動校準（§D.2）。
+7. 缺初始狀態或轉換卻宣告 `replayScope.calibration = true` → `CALIBRATION_REPLAY_STATE_INCOMPLETE`。
+
 ### D.2 `replayScope.calibration` 的範圍（誠實界線）
 
-- `calibration = true` 的意思：**自動校準的決策**可由已存 hint、已存輸入、`autoReferenceConfigFingerprint` 重現，包含無效 hint 與重設。
+- `calibration = true` 的意思：**自動校準的決策**可由已存 hint、已存輸入、`autoReferenceConfigFingerprint`、**自動參考控制狀態事件（§D.1a）** 重現，包含無效 hint、重設與暫停區間。
 - **手動校準不是從證據重算**：它是人為動作的記錄值（向量、`sourceRange`、`leftLeanConfirmation`），視為已記錄的輸入。契約**不宣稱**可由 motion 證據重算手動校準。任何要求把手動指令視窗保存成可重算證據的需求，另案（現不在 v2）。
-- 未寫入 `lean_hint` 前（目前 Codex 的實驗模式已停用自動參考），`calibration` 恆為 false。
+- 未寫入 `lean_hint`、初始狀態或轉換事件前（目前 Codex 的實驗模式已停用自動參考），`calibration` 恆為 false。三種 `replayScope` 在各自資料與 Kotlin 決定性測試完成前均維持 false。
 
 ### D.3 污染傳遞
 
 定義**污染集合** `T = {sensor_accuracy_unreliable, calibration_input_unverified, sensor_accuracy_unknown}`。
 
-- 校準的 `qualityFlags` 與 `T` 有交集 → 所有使用該校準的 `lean_estimate` 必須帶 `calibration_input_unverified`，且 `extremumEligible=false`（`ESTIMATE_CALIBRATION_TAINT_DROPPED`）。**舊格式只帶 `sensor_accuracy_unreliable` 的校準也適用**，這正是 F1 指出的漏洞。
+- 校準的 `qualityFlags` 與 `T` 有交集 → 所有使用該校準的 `lean_estimate` 必須帶 `calibration_input_unverified`，且 `extremumEligible=false`。漏帶旗標即 `ESTIMATE_CALIBRATION_TAINT_DROPPED`，**與該估算是否 eligible 無關**（eligible=false 但漏傳旗標同樣違規）。**舊格式只帶 `sensor_accuracy_unreliable` 的校準也適用**，這正是 F1 指出的漏洞。
 - 來源準確度恢復 high **不洗白**舊校準：估算自己的輸入旗標乾淨，仍要帶傳遞而來的旗標。只有**新的**校準（新 `calibrationId`、乾淨旗標、完整 evidence）才能解除。
 - `carried_over` 校準必須包含來源校準旗標 ∩ `T`（`CARRIED_OVER_TAINT_DROPPED`）。
-- 這條規則是單檔規則，不需要配對。v1 檔同樣適用（V1-2 的延伸，列入 A.3 的變更；影響限於帶這些旗標又標 eligible 的估算）。
+- 這條規則是單檔規則，不需要配對。v1 檔同樣適用，列為 A.3 的 V1-4／V1-5（不是 V1-2 的延伸，影響範圍包含 eligible=false 的估算）。`sensor_accuracy_unknown` 只屬 v2 的污染集合；v1 的污染集合只有前兩個旗標。
 
 ### D.4 資格（修訂）
 
@@ -375,7 +432,8 @@ raw 檔出現完整損壞行（`NOT_JSON`、重複／衝突序號、身分異常
 
 | 編號 | 案例 |
 |---|---|
-| V-01 | 最小 v2 motion＋lean，`time_bucket_first`，全檔 `schemaVersion: 2` |
+| V-01a | 最小 v2：缺 policy＋`storageStride=1`（全存） |
+| V-01b | 最小 v2：`time_bucket_first`＋`lossy=true`＋`storageStride=null` |
 | V-02 | 初始 `unobserved` → 首次觀測事件；`unavailable` 來源 |
 | V-03 | 桶內 high→unreliable→high 全在略過位置，兩個 `source_accuracy_state` 存在 |
 | V-04 | 純 UTC `clock_adjusted`（同 boot）：只新增 `clock_map`，policy／anchor 不變 |
@@ -392,6 +450,9 @@ raw 檔出現完整損壞行（`NOT_JSON`、重複／衝突序號、身分異常
 | V-15 | 污染傳遞：舊格式只帶 `sensor_accuracy_unreliable` 的校準，估算帶 `calibration_input_unverified` 且 `extremumEligible=false`；新校準解除 |
 | V-16 | `lean_hint`：有效與無效（全 null）hint、`auto_reference_reset`、`hintRange` 完整；`--location` 一致 |
 | V-17 | 資格：`experimental`＋`algorithm_unqualified`；`qualified`＋配置指紋重算相符（輸出仍為 `declared_unverified`） |
+| V-16a | 自動參考狀態：路徑一——`initial=enabled`，無任何手動指令，連續 hint 累積 |
+| V-16b | 路徑二（相同 motion、相同 GPS）——中途 `reset`→`suspended(manual_command_started)`，尚未完成即 `reset`→`enabled(manual_command_cancelled)`；暫停區間沒有 hint，恢復邊界之後才重新累積，候選數與路徑一不同 |
+| V-16c | 校準存在期間 `disabled(calibration_present)`；`calibration_invalidated` 後 `enabled(calibration_cleared)`（先 reset） |
 | V-18 | v1 檔與 v2 檔各自通過；location-log 零 sample、零 event 測試延續到 v2 檔 |
 
 ### 非法（invalid，`.expected` 列出必須出現的碼）
@@ -402,7 +463,11 @@ raw 檔出現完整損壞行（`NOT_JSON`、重複／衝突序號、身分異常
 | I-02 | `schemaVersion: 3` | `UNSUPPORTED_SCHEMA_VERSION`（exit 4，非 PASS） |
 | I-03 | v1 估算帶兩旗標又 `extremumEligible=true` | `EXTREMUM_ELIGIBLE_BLOCKED` |
 | I-04 | 同 session 內改 `inputPolicy` | `POLICY_REDECLARED` |
-| I-05 | `storageStride=null` 無 `inputPolicy` | `STRIDE_POLICY_CONFLICT` |
+| I-05a | 缺 policy＋`storageStride=2` | `SCHEMA_INVALID`（v2 stride 只允許 1／null） |
+| I-05b | 缺 policy＋`storageStride=null` | `STRIDE_POLICY_CONFLICT` |
+| I-05c | `time_bucket_first`＋`storageStride=1` | `STRIDE_POLICY_CONFLICT` |
+| I-05d | `time_bucket_first`＋`storageStride=2` | `SCHEMA_INVALID` |
+| I-05e | `time_bucket_first`＋`lossy=false`，或未知 `kind` | `SCHEMA_INVALID` |
 | I-06 | 同桶兩筆保留樣本 | `SELECTION_BUCKET_VIOLATION` |
 | I-07 | 相鄰保留樣本 accuracy 不同且無事件 | `ACCURACY_CHANGE_UNRECORDED` |
 | I-08 | `previous` 與現行準確度狀態不符 | `ACCURACY_STATE_CHAIN` |
@@ -419,8 +484,16 @@ raw 檔出現完整損壞行（`NOT_JSON`、重複／衝突序號、身分異常
 | I-19 | warm-up 輸出缺 `filter_warmup` | `FILTER_WARMUP_UNFLAGGED` |
 | I-20 | 缺口兩邊不重設濾波狀態 | `FILTER_STATE_ACROSS_GAP` |
 | I-21 | `refilter=true` 但係數只有雜湊／raw 為 lossy／筆數對不上 | `REFILTER_SPEC_UNRESOLVABLE`／`REFILTER_ON_LOSSY_RAW`／`REFILTER_RAW_INCOMPLETE` |
-| I-22 | 校準帶污染旗標，估算未帶 `calibration_input_unverified` | `ESTIMATE_CALIBRATION_TAINT_DROPPED` |
-| I-23 | `carried_over` 丟失來源污染旗標 | `CARRIED_OVER_TAINT_DROPPED` |
+| I-22a | 校準帶污染旗標，估算 `extremumEligible=true` 且未帶 `calibration_input_unverified` | `ESTIMATE_CALIBRATION_TAINT_DROPPED`（另有 `EXTREMUM_ELIGIBLE_BLOCKED` 視旗標而定） |
+| I-22b | 同上但 `extremumEligible=false`、仍漏傳旗標（v1 與 v2 各一） | `ESTIMATE_CALIBRATION_TAINT_DROPPED` |
+| I-22c | v1 檔只帶 `sensor_accuracy_unknown` | **不**視為污染（只有 `UNKNOWN_QUALITY_FLAG` 警告）；v2 檔同情況則算污染 |
+| I-23 | `carried_over` 校準丟失來源校準的污染旗標（v1 與 v2 各一） | `CARRIED_OVER_TAINT_DROPPED` |
+| I-24a | `lean_started` 之後第一筆 hint 前沒有 `auto_reference_state` | `AUTO_STATE_MISSING` |
+| I-24b | `suspended`／`disabled` 期間出現 `lean_hint` | `HINT_WHILE_NOT_ENABLED` |
+| I-24c | 現行校準存在期間出現 `lean_hint`（未標 disabled 亦然） | `HINT_WHILE_CALIBRATED` |
+| I-24d | 暫停後直接 `enabled` 而沒有 `auto_reference_reset` | `AUTO_RESUME_WITHOUT_RESET` |
+| I-24e | `afterInputs` 倒退／超前（含狀態事件） | `HINT_CURSOR_REGRESSION`／`HINT_CURSOR_AHEAD` |
+| I-24f | 缺初始狀態或轉換卻宣告 `replayScope.calibration=true` | `CALIBRATION_REPLAY_STATE_INCOMPLETE` |
 | I-24 | `hintRange` 有缺號／晚於校準 | `HINT_RANGE_INCOMPLETE`／`HINT_AFTER_CALIBRATION` |
 | I-25 | hint 的 `afterInputs` 倒退或超前 | `HINT_CURSOR_REGRESSION`／`HINT_CURSOR_AHEAD` |
 | I-26 | `--location` 下 `gpsRef` 與 `fix` 不符 | `HINT_GPS_MISMATCH` |
@@ -436,10 +509,24 @@ raw 檔出現完整損壞行（`NOT_JSON`、重複／衝突序號、身分異常
 
 ### 差異回歸（雙向）
 
-`testdata/contracts/motion-lean/v1/regression/`：
-- R-01：多 session 檔，早期 session `storageStride 2`、後期 `1`，**舊工具（`Math.max`）誤報、新工具不誤報**。
-- R-02：多 session 檔，早期 `1`、後期 `2` 且 `replayable=true`，**新工具報 `REPLAY_STRIDE_DROPS_INPUTS`、舊工具漏報**。
-- R-03：v1 估算帶兩旗標＋eligible（V1-2）。
+位置：`testdata/contracts/motion-lean/v1/regression/`。舊工具指 PR #10 的 `7474933`。
+
+**舊工具的實際行為**（`static validation`，讀 `validate-motion-lean.mjs`）：motion 宣告先以 `Math.max(known.storageStride ?? 1, source.storageStride)` 累積成**全檔**的最大 stride（行 391）；配對時以該值檢查，每個來源**只報一次**（`strideReported`，行 874–877），報在**該來源第一個 `replayable=true` 估算的引用處**。因此：只要全檔任一 session 的 stride > 1，舊工具對該來源就會看到 stride > 1，**位置可能落在錯誤的 session**；它並非「必然漏報」。
+
+每個 R 案例的 `.expected` 在建立 fixtures 時**以舊工具實際執行的 error 碼與行號為準記錄**（寫入 `.old-tool` 檔供差異測試比對），新工具僅依「被引用樣本所屬 session」的宣告判斷，每個 (來源, session) 至多報一次。不強造「舊 PASS、新 FAIL」。
+
+| 案例 | 結構 | 舊工具（預期，建立時以實跑為準） | 新工具 |
+|---|---|---|---|
+| R-01 | session A stride 2、session B stride 1；`replayable=true`，估算引用只在 B | 看到全檔 stride 2，在 B 的第一個引用報 `REPLAY_STRIDE_DROPS_INPUTS`（**錯誤 session，false positive**） | 無 error |
+| R-02a | session A stride 1、session B stride 2；`replayable=true`，估算引用在 A 與 B | 看到 stride 2，**在 A 的第一個引用報**（錯誤 session），B 不再報 | 只在 B 的引用報，A 無 |
+| R-02b | 同 R-02a，但估算引用只在 B | 在 B 報（位置碰巧正確） | 在 B 報（相同） |
+| R-02c | 同 R-02a，但估算引用只在 A | 在 A 報（false positive） | 無 error |
+| R-03 | v1 估算帶兩旗標＋eligible=true | 兩旗標為未知旗標：只有警告，不報 error | `EXTREMUM_ELIGIBLE_BLOCKED` |
+| R-04 | v1 校準帶 `sensor_accuracy_unreliable`；估算 eligible=false 且漏傳 `calibration_input_unverified` | 無 error | `ESTIMATE_CALIBRATION_TAINT_DROPPED` |
+| R-05 | v1 `carried_over` 校準丟失來源的 `calibration_input_unverified` | 無 error | `CARRIED_OVER_TAINT_DROPPED` |
+| R-06 | v1 檔出現 `sensor_accuracy_unknown` | `UNKNOWN_QUALITY_FLAG` 警告 | 同左（V1 不回溯） |
+
+R-01、R-02 同時涵蓋 2→1 與 1→2 兩種方向。R-03～R-05 是歷史收緊（A.3 V1-2、V1-4、V1-5），新工具的 error 屬**預期的有意變更**，差異測試以此清單為豁免依據，其餘 v1 fixtures 結果必須逐碼逐行相同。
 
 ## G. 已知限制與未決事項
 
@@ -449,7 +536,10 @@ raw 檔出現完整損壞行（`NOT_JSON`、重複／衝突序號、身分異常
 4. **`qualificationRef` 的本機註冊表格式**（`--qualification-registry`）只定義語義，欄位細節在 C2 PR。
 5. **v2 目錄的規範文字**：C1 PR 產生完整的 v2 README（含 v1 差異對照）；在此之前以本文件為設計依據，衝突時以 C1 PR 的 README 為準。
 6. **location-log 驗證器**仍為整檔讀取，GPS 檔體量小，不在 2 GiB 範圍；不排工作。
-7. **跨裝置 `sampleAgeMsAtSend` 等工程規則 §10 待定項**與本文件無關，不處理。
+7. **R 案例的舊工具預期**目前是依原始碼推導，fixtures 建立時必須以舊工具實跑結果覆寫；若與本表不同，以實跑為準並更正本文件。
+8. **自動參考控制狀態的 reason 清單**依 `LeanPipeline.kt` 現況列出；寫入端若有未列入的外部開關，需先回報契約擁有者增列，不得自行新增 reason。
+9. **V1-4／V1-5 對既有私有 v1 檔**：untested，待 C2 驗證器存在。
+10. **跨裝置 `sampleAgeMsAtSend` 等工程規則 §10 待定項**與本文件無關，不處理。
 
 ## H. 與手機端的邊界（不要求、僅供對齊）
 
