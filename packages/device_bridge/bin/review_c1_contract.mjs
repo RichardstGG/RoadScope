@@ -54,5 +54,20 @@ qualification.configurationFingerprint = createHash('sha256')
 expectRejected('C1-3: qualified configuration names an undeclared input',
   validateLeanLog(ndjson(lean), { motion: raw }));
 
+// Recovery must not erase the missing reset/disabled transition from an interruption.
+const recovery = read('lean/valid/05a-auto-reference-never-suspended.ndjson');
+assert.equal(validateLeanLog(ndjson(recovery)).ok, true, 'recovery baseline');
+recovery[0].replayScope.calibration = true;
+const stateBase = recovery[2];
+const blocked = { ...stateBase, eventType: 'estimator_state',
+  state: 'unavailable', reason: 'input_interrupted' };
+delete blocked.afterInputs;
+const available = { ...blocked, state: 'available', reason: null };
+const resetEpoch = { ...recovery[1], filterEpoch: 1, reason: 'input_clock_state_change' };
+const reenabled = { ...stateBase, reason: 'estimator_available' };
+recovery.splice(3, 0, blocked, available, resetEpoch, reenabled);
+expectRejected('C1-2 recovery: enabled after recovery erases missing reset/disabled history',
+  validateLeanLog(ndjson(recovery)));
+
 console.log(`${bypasses} invalid case(s) incorrectly accepted`);
 process.exitCode = bypasses ? 1 : 0;

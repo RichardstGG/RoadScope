@@ -1,5 +1,43 @@
 # C1 手機端可實作性與參考驗證器復核
 
+## 修正復核：8f2a123（2026-10-08）
+
+核對遠端 `8f2a1238febc7e8c9acd922c882aeaa7c6d25f5b`。獨立固定副本重跑成功：
+21 location fixtures、242 v2 檔案一致、321 motion／lean 檢查；原本三個突變全部被拒絕。
+**C1-1、C1-3 關閉；C1-2 直接路徑已修正，但恢復路徑仍有一項阻擋。**
+下方原始審查保留歷史，最新狀態以本節為準。
+
+### C1-2 恢復時不能清掉漏存的歷史（P1）
+
+`applyAutoState` 的 `else if (!state.unavailable) auto.owed = null` 允許恢復後的 enabled
+直接清掉先前中斷欠下的 reset／disabled，即使那些事件從未保存。
+重現順序：initial enabled → estimator unavailable → estimator available → 新 estimator epoch
+→ auto enabled(estimator_available) → hint；中間沒有 auto_reference_reset／disabled。
+宣告 calibration=true 後仍回報 ok=true、零 findings。
+也已以新增的非法 13c fixture 加一筆恢復 enabled 重現，並非依賴舊 fixture 的特殊格式。
+
+請讓待補轉換只由正確的 reset＋disabled 事件完成，不能由後來 enabled、其他 reason 的
+狀態或新的 lean_started 靜默清除；一旦跨過合法邊界仍未補齊，就保存不可撤銷的違規結果。
+請一併以狀態表測試正常中斷／恢復、漏 disabled 後再 enabled、錯誤 reason、resume／重新
+宣告與 EOF，區分「目前條件恢復」與「先前控制歷史完整」。不需要改變已接受的契約方向。
+更新後的 bin/review_c1_contract.mjs 包含第四個恢復反例；對 8f2a123 為三項拒絕成功、
+一項誤通過，exit 1。此缺口修正前 C1 仍不作為 S2／C2 已驗收基準。
+
+### 對兩個手機端問題的確認
+
+- static validation：runtime 63e1b91 的 LeanPipeline.interrupted() 明確呼叫 automatic.reset()，
+  同時清除 pendingAutomatic／pendingManual。接受 unavailable 中斷前後必須保存 reset 的規則。
+  這不是 v2 writer 已實作或真機已驗證；實際指令／中斷注入仍列手機端測試。
+- 接受一個 qualified run 的單一配置必須匹配 motion 每個 session 的嚴格限制。
+  若該 recording 改變採樣 policy 或來源可用性，不能靠另開 lean run 逃過全檔條件；
+  維持 experimental，或使用者新開 recording 後再驗證資格。S2 不自動宣告 qualified，
+  因此不阻擋目前寫入端設計；未來若需分段資格，須另提契約變更，不能暗中放寬。
+
+本輪 automated tests 與 static validation 如上；manual／hardware tests 未執行。
+未讀私人紀錄，未改契約與 runtime。下一步只需修補剩餘的 C1-2 恢復狀態追蹤；S1 仍獨立可做。
+
+---
+
 2026-10-08；審查提交 `c47e91a17a99f6c69786a38bef1df46e6b08db53`，
 分支 contracts/motion-lean-v2-c1，base PR #10 `967d954`。本次核對時尚無 C1 PR。
 Codex runtime 仍為 `63e1b91`；本輪不改手機程式或他方契約。
