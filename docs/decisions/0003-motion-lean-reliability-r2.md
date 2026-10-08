@@ -4,6 +4,7 @@
 狀態：**設計，未實作、未生效。** 本文件不改 `contracts/motion-lean/v1/` 任何檔案，也不是新 schema。待 Codex 復核手機端可實作性後，才進 C1／C2／C3 的實作 PR。
 影響路徑：`contracts/motion-lean/`、`contracts/tools/`、`testdata/contracts/motion-lean/`（皆為契約擁有者路徑；本文件不要求任何人改 `device_bridge`、`apps/mobile`、`mobile_data`、`timing_core`）。
 相關：0002（v1）、手機端提案 `packages/device_bridge/RECORDING_RELIABILITY_DESIGN.md`（D1）、`CONTRACT_FEASIBILITY_REVIEW.md`（F1，PR #11 `13b68a3`）。
+第三版（Codex 最終復核，PR #11 `1e85c5f`）：消除 §B.5 錯誤碼文字、§D.1a 狀態事件的內部矛盾，並新增 §H C1 驗收條件。
 契約基準：PR #10 `7474933`。本文件取代上一輪口頭回覆中的 revision 方案（見 §A）。
 第二版（回應 F2，PR #11 `ffdb350`）：補 §A.3 相容影響、§B.5 policy／stride 單一解釋、§D.1a 自動參考控制狀態、§F 案例與回歸。其餘 A～E 已被 Codex 接受，未重開。
 
@@ -144,17 +145,18 @@ v2 寫入端遇到 v1 的 motion／lean 檔：**不追加**。該 recording 的 
   "unverifiedRule": "received_time_bucket"
 }
 ```
-- **v2 的 `inputPolicy` 與 `storageStride` 只有兩種合法組合**，其餘一律 `STRIDE_POLICY_CONFLICT`：
+- **v2 的 `inputPolicy` 與 `storageStride` 只有兩種合法組合**。其餘組合一律拒絕，錯誤碼依原因分兩種：`storageStride` 型別不屬於 `{1, null}`（例如 ≥2）→ `SCHEMA_INVALID`；型別合法但組合矛盾 → `STRIDE_POLICY_CONFLICT`。下表逐列標明：
 
 | `inputPolicy` | `storageStride` | 結果 | 語義 |
 |---|---|---|---|
 | 缺省 | `1` | 合法 | 全存（非 lossy） |
 | `kind = time_bucket_first`、`lossy = true` | `null` | 合法 | 時間桶選樣（lossy） |
-| 缺省 | `≥ 2` | `STRIDE_POLICY_CONFLICT` | v2 不保留型號除數 |
+| 缺省 | `≥ 2` | `SCHEMA_INVALID` | v2 不保留型號除數 |
 | 缺省 | `null` | `STRIDE_POLICY_CONFLICT` | |
-| 存在 | `1` 或 `≥ 2` | `STRIDE_POLICY_CONFLICT` | |
+| 存在 | `1` | `STRIDE_POLICY_CONFLICT` | |
+| 存在 | `≥ 2` | `SCHEMA_INVALID` | |
 
-- v2 schema：`storageStride ∈ {1, null}`（整數 ≥2 在 v2 為 `SCHEMA_INVALID`，與衝突碼的區別見 §F）；`inputPolicy.kind` 只允許 `time_bucket_first`，`lossy` 必為 `true`；其他 kind 為 `SCHEMA_INVALID`（新增 kind 需契約 PR）。
+- v2 schema：`storageStride ∈ {1, null}`；`inputPolicy.kind` 只允許 `time_bucket_first`，`lossy` 必為 `true`；其他 kind 為 `SCHEMA_INVALID`（新增 kind 需契約 PR）。
 - 整數 stride（>1）只存在於 v1，不為已決定移除的型號除數增加 v2 模式。
 - 「非 lossy」的判定在 v2 只有一種：缺 policy 且 stride = 1（用於 §C.6 `refilter`）。
 - `available: false` 的來源既無 policy 也無 stride（沿用現行 schema）。
@@ -343,15 +345,17 @@ raw 檔出現完整損壞行（`NOT_JSON`、重複／衝突序號、身分異常
 
 規則：
 1. **初始狀態必記**：每個 `lean_started` 之後、每個 `recording_resumed` 之後，在第一筆 `lean_hint` 之前，必須有一筆 `auto_reference_state`（`reason = initial` 或 `recovery`）。缺 → `AUTO_STATE_MISSING`。
-2. **每次狀態變更必記**，帶 `afterInputs`（與 `lean_hint.afterInputs` 同語義：此刻自動參考已消費的各輸入最後序號；每來源非遞減、不超過檔內已存在最大值）。
-3. **語義**：`enabled` ＝ 可呼叫 `updateFix`／`add`；`suspended` ＝ 外部（使用者手動指令）暫停；`disabled` ＝ 因條件不成立而停用（現行校準存在、估算不可用、實驗輸入）。`suspended` 與 `disabled` 期間**不得**出現 `lean_hint`（`HINT_WHILE_NOT_ENABLED`），也不累積候選。
+2. **所有有效的 `enabled`／`suspended`／`disabled` 轉換均保存**（不得省略、不得因去重丟掉），每筆帶 `afterInputs`（與 `lean_hint.afterInputs` 同語義：此刻自動參考已消費的各輸入最後序號；每來源非遞減、不超過檔內已存在最大值）。
+3. **語義**：`enabled` 是**必要而非充分**條件：`updateFix` 與 `add` 仍分別套用版本化演算法的呼叫條件（`add` 另受 `pendingAutomatic`、紀元起點後一秒等限制）。`enabled` ＝ 允許呼叫；`suspended` ＝ 外部（使用者手動指令）暫停；`disabled` ＝ 因條件不成立而停用（現行校準存在、估算不可用、實驗輸入）。`suspended` 與 `disabled` 期間**不得**出現 `lean_hint`（`HINT_WHILE_NOT_ENABLED`），也不累積候選。
 4. **與 reset 的次序**（同一個 `afterInputs` 邊界內，依 lean 檔出現順序處理）：
    - 進入 `suspended`（手動指令開始）：先 `auto_reference_reset`，再 `auto_reference_state(suspended, manual_command_started)`。
-   - 離開 `suspended` 回 `enabled`（取消）：先 `auto_reference_reset`，再 `auto_reference_state(enabled, manual_command_cancelled)`。缺少 reset 就恢復 → `AUTO_RESUME_WITHOUT_RESET`。
+   - 手動指令取消：先 `auto_reference_reset`，再記**取消後的實際狀態**。`cancel` **只解除手動暫停**，不能抹掉其他阻擋條件：若現行校準、mount、估算不可用或 experimental 仍成立，必須記 `auto_reference_state(disabled, <對應原因>)`，**不得無條件寫 `enabled`**；只有所有阻擋條件都已解除才記 `enabled, manual_command_cancelled`。缺少 reset 就恢復 `enabled` → `AUTO_RESUME_WITHOUT_RESET`；取消後仍受阻卻記 `enabled` → `AUTO_ENABLED_WHILE_BLOCKED`。
+   - **每次實際 reset 都保存**，即使前後狀態相同（例如 upright→left，`suspended`→`suspended`）；`auto_reference_reset` 不受狀態去重影響。
+   - **初始狀態須在首次候選處理或第一筆 hint 之前存在**（規則 1）。
    - 恢復邊界之後的輸入才開始重新累積；暫停期間的輸入不屬於候選。
-5. **可由版本化演算法與完整輸入重算的條件不重複保存**：`pendingAutomatic`、紀元起點後一秒、候選容量飽和、`delivered` 等。**所有外部開關必須可判定**——手動指令的開始／取消／完成是外部開關，必須有狀態事件；其餘條件（`available`、現行校準、實驗輸入）可由 `estimator_state`、`lean_calibration`／`calibration_invalidated`、準確度狀態推得，寫入端可省略對應狀態事件，但驗證器會單檔檢查「現行校準存在期間出現 hint」→ `HINT_WHILE_CALIBRATED`。若寫入端無法判定某個外部條件，`replayScope.calibration` 必須為 false。
+5. **可由版本化演算法與完整輸入重算的**內部條件不重複保存：`pendingAutomatic`、紀元起點後一秒、候選容量飽和、`delivered` 等。**這是唯一可省略的類別**；有效的狀態轉換（規則 2）一律保存，包含 `available`、現行校準、實驗輸入造成的 `disabled`／`enabled` 轉換。驗證器另單檔檢查「現行校準存在期間出現 hint」→ `HINT_WHILE_CALIBRATED`。若寫入端無法判定某個外部條件，`replayScope.calibration` 必須為 false。
 6. **不擴張範圍**：手動校準結果仍是記錄輸入，不要求保存整套手動證據，也不重算手動校準（§D.2）。
-7. 缺初始狀態或轉換卻宣告 `replayScope.calibration = true` → `CALIBRATION_REPLAY_STATE_INCOMPLETE`。
+7. 缺初始狀態、轉換或 reset 卻宣告 `replayScope.calibration = true` → `CALIBRATION_REPLAY_STATE_INCOMPLETE`。
 
 ### D.2 `replayScope.calibration` 的範圍（誠實界線）
 
@@ -452,6 +456,9 @@ raw 檔出現完整損壞行（`NOT_JSON`、重複／衝突序號、身分異常
 | V-17 | 資格：`experimental`＋`algorithm_unqualified`；`qualified`＋配置指紋重算相符（輸出仍為 `declared_unverified`） |
 | V-16a | 自動參考狀態：路徑一——`initial=enabled`，無任何手動指令，連續 hint 累積 |
 | V-16b | 路徑二（相同 motion、相同 GPS）——中途 `reset`→`suspended(manual_command_started)`，尚未完成即 `reset`→`enabled(manual_command_cancelled)`；暫停區間沒有 hint，恢復邊界之後才重新累積，候選數與路徑一不同 |
+| V-16d | 取消手動指令時校準仍存在：reset→`disabled`（不是 `enabled`），之後 `calibration_invalidated` 才 reset→`enabled` |
+| V-16e | 暫停中連續兩次 reset（upright→left）：兩筆 `auto_reference_reset` 都保存，狀態維持 `suspended` |
+| V-16f | 同一 `afterInputs` 邊界內 hint／reset／state 多筆，依檔案順序處理，結果與逐筆重播一致 |
 | V-16c | 校準存在期間 `disabled(calibration_present)`；`calibration_invalidated` 後 `enabled(calibration_cleared)`（先 reset） |
 | V-18 | v1 檔與 v2 檔各自通過；location-log 零 sample、零 event 測試延續到 v2 檔 |
 
@@ -492,6 +499,8 @@ raw 檔出現完整損壞行（`NOT_JSON`、重複／衝突序號、身分異常
 | I-24b | `suspended`／`disabled` 期間出現 `lean_hint` | `HINT_WHILE_NOT_ENABLED` |
 | I-24c | 現行校準存在期間出現 `lean_hint`（未標 disabled 亦然） | `HINT_WHILE_CALIBRATED` |
 | I-24d | 暫停後直接 `enabled` 而沒有 `auto_reference_reset` | `AUTO_RESUME_WITHOUT_RESET` |
+| I-24g | 取消後 estimator 不可用／experimental／mount 仍成立卻記 `enabled` | `AUTO_ENABLED_WHILE_BLOCKED` |
+| I-24h | 暫停中第二次 reset 被省略，使重播邊界與完整基準不同 | `AUTO_RESET_MISSING`（以與完整重播基準比對的配對 fixture 驗證 reset 與轉換的必要次序） |
 | I-24e | `afterInputs` 倒退／超前（含狀態事件） | `HINT_CURSOR_REGRESSION`／`HINT_CURSOR_AHEAD` |
 | I-24f | 缺初始狀態或轉換卻宣告 `replayScope.calibration=true` | `CALIBRATION_REPLAY_STATE_INCOMPLETE` |
 | I-24 | `hintRange` 有缺號／晚於校準 | `HINT_RANGE_INCOMPLETE`／`HINT_AFTER_CALIBRATION` |
@@ -541,7 +550,19 @@ R-01、R-02 同時涵蓋 2→1 與 1→2 兩種方向。R-03～R-05 是歷史收
 9. **V1-4／V1-5 對既有私有 v1 檔**：untested，待 C2 驗證器存在。
 10. **跨裝置 `sampleAgeMsAtSend` 等工程規則 §10 待定項**與本文件無關，不處理。
 
-## H. 與手機端的邊界（不要求、僅供對齊）
+## H. C1 驗收條件（Codex 最終復核，PR #11 `1e85c5f`）
+
+下列條件須在 C1 review 核對；缺任一項，`replayScope.calibration = true` 不得驗收。本節只記錄條件，C1 尚未開始。
+
+1. §B.5 錯誤碼文字與表格一致（本版已修正）：stride ≥2 → `SCHEMA_INVALID`；型別合法但組合矛盾 → `STRIDE_POLICY_CONFLICT`；`available=false` 來源不帶 stride／policy 的分支保留。
+2. §D.1a：所有有效狀態轉換均保存；只省略可重算的內部條件；`enabled` 為必要非充分；cancel 後仍受阻必須 `disabled`；每次實際 reset 都保存；初始狀態先於首次候選處理與第一筆 hint。
+3. 上述邊界必須同時出現在 C1 fixtures（V-16a～f、I-24a～h）與後續 Kotlin replay 驗收；缺條件卻宣告 `calibration=true` 必須被拒絕。
+4. R-01／R-02a～c 建立 fixtures 時必須**實跑舊工具（`7474933`）**，以實際 error 碼與行號寫入 `.old-tool`；文中推導值只是預期，不是基準。
+5. V1-4／V1-5 對既有私有 v1 檔仍為 untested，待 C2；不改寫歷史檔。
+6. 三種 `replayScope`（`estimate`／`calibration`／`refilter`）在各自必要資料與 Kotlin 決定性測試完成前均維持 false；schema 通過或 `qualificationRef` 存在不能替代重播／精度證據。
+7. S5 聯合 frame 為正式比較候選，但不鎖 frame 格式、輸出率，也不提高 R1 容量預算；需定義來源時間對齊、過期與缺值規則，資訊可得時間不得早於任何被使用輸入。
+
+## I. 與手機端的邊界（不要求、僅供對齊）
 
 契約擁有者不修改 `device_bridge`、`apps/mobile`、`mobile_data`、`timing_core`。以下為 Codex 實作時需要自行確認的前提，列出來是為了避免假設落差：
 
