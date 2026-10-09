@@ -110,7 +110,9 @@ for (const profile of profiles) {
   for (const code of errors) if (!expected.errors.includes(code)) problems.push(`unexpected ${code}`);
   const wantStatus = expected.errors.length ? 1 : 0;
   if (result.status !== wantStatus && !problems.length) problems.push(`exit ${result.status}, expected ${wantStatus}`);
-  const rss = (result.maxRssKiB ?? 0) * 1024;
+  // Judged on the stricter value: getrusage's maxRSS (which on Linux also counts this small parent's image
+  // at fork) and the child's own VmHWM are both recorded.
+  const rss = Math.max(result.maxRssKiB ?? 0, result.vmHwmKiB ?? 0) * 1024;
   if (!rss) problems.push('no RSS measurement');
   else if (rss > budget) problems.push(`peak RSS ${Math.round(rss / 2 ** 20)} MiB exceeds ${Math.round(budget / 2 ** 20)} MiB`);
 
@@ -136,6 +138,8 @@ for (const profile of profiles) {
     motionLines: expected.motionLines,
     leanLines: expected.leanLines,
     peakRssMiB: Math.round((rss / 2 ** 20) * 10) / 10,
+    getrusageMaxRssMiB: Math.round(((result.maxRssKiB ?? 0) / 1024) * 10) / 10,
+    vmHwmMiB: result.vmHwmKiB ? Math.round((result.vmHwmKiB / 1024) * 10) / 10 : null,
     wallSeconds: Math.round(result.wallMs / 100) / 10,
     cpuSeconds: Math.round(((result.userMs ?? 0) + (result.systemMs ?? 0)) / 100) / 10,
     peakTmpMiB: Math.round(result.peakTmpBytes / 2 ** 20),

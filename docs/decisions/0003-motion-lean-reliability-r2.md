@@ -614,3 +614,10 @@ C2 依 §E 實作，Codex 已接受的 C1 語義（345 項 fixtures 與四個 co
 
    峰值 RSS 以子行程 `getrusage` 的 maxRSS 量得。所有 profile 都完整執行，沒有觸發安全網。小尺寸（4 MB）時另以 `--compare-reference` 確認 findings 與 C1 參考實作完全相同。前一輪量測中 `clock-churn` 觸發安全網（見第 7 項，已修正）；`many-findings` 那一輪的實際時間 30,702 秒而 CPU 僅 279 秒，判斷為量測期間機器休眠，本輪實際時間與 CPU 時間一致。**耗時與暫存只是這台機器的觀測，不是承諾**；CI runner 的數字以 `large` job 的報告為準，尚未在 GitHub 上執行。
 10. **未涵蓋**：Windows／macOS 上的 `better-sqlite3` 安裝與量測；CI runner 上的大檔執行；`--location`、`--qualification-registry`。`ajv@8.17.1`（PR #10 起即鎖定）有一則 moderate 等級的 ReDoS 公告（GHSA-2g4f-4pwh-qvx6），只在啟用 `$data` 選項時觸發；本工具未啟用該選項，C2 不改動 ajv 版本，升級另案處理。
+11. **C2 復核修正（Codex `f041f4e`，三項執行層問題）**：
+    - **C2-1 findings 輸出覆寫輸入**：所有輸入（清單、`--motion`、`--parent`）先開啟並取得檔案身分；`--findings-out` 以不截斷方式開啟，對**同一個描述元** fstat 核對 dev:ino，與任何輸入相同就拒絕（exit 2），通過後才經同一描述元截斷，檢查與使用之間沒有空隙。驗證期間讀取的也是那些已開啟的描述元。別名矩陣：同路徑、相對路徑、symlink、hardlink、`--motion` 別名、`--parent` 別名、lean 輸入的 hardlink，拒絕後所有輸入的 SHA-256 不變。
+    - **C2-2 中途失敗丟失 findings**：findings 在驗證過程中同步寫入 `--findings-out`；中途停止（行過長、RSS、取消、索引寫入失敗、findings 輸出失敗）時，進行中的檔案以 `INCOMPLETE` 報告（`--json` 為 `"complete": false` 的合法項目）列出停止前的 findings，`--findings-out` 最後加 `VALIDATION_INCOMPLETE`，exit 3／130，永不報 PASS。另修正一個潛在錯誤：`catch` 中 `return` 未 `await` 會讓 `finally` 先刪除暫存的 findings。成功時的輸出格式與順序不變（820 項 C1 等價比對）。
+    - **C2-3 偵測階段繞過保護**：kind 與 schemaVersion 改為一次串流探測，與驗證共用行長上限與守衛；`--parent` 以分塊、可取消的方式雜湊；findings 重播有界。stdout 排空期間也檢查取消（等待 drain 與取消競速，每 256 次寫入讓出一次事件迴圈，結束前等 stdout 真正清空），因此輸出中送 SIGINT 會得到 130。
+    - **RSS 量測方法更正**：Linux 的 `getrusage` maxRSS 跨 `execve` 保留，子行程的值會包含父行程 fork 時的映像（實測：父行程持有 200 MiB 時，子行程的 maxRSS 讀到 203 MiB，而它自己的 `VmHWM` 只有 41 MiB）。因此 STATS 同時回報 `vmHwmKiB`（子行程自身峰值）與 `maxRssKiB`。大檔驗收以兩者中較大者判定（較保守）；父行程本身持有大型緩衝的測試以 `VmHWM` 判定。先前以 getrusage 量得的 2 GiB 數字是保守上界，結論不變。
+12. **修正後重跑（2026-10-09 06:25–06:39 UTC，同一台機器，重用相同的合成輸入）**：七組 2 GiB 全部完整通過；峰值 RSS（getrusage 與 VmHWM 取大者，本次兩者相同）valid 193.0、tail-corrupt 189.0、long-duplicate 191.4、session-churn 193.2、dangling-refs 184.7、clock-churn 191.9、many-findings 192.4 MiB；耗時 101–175 秒；暫存峰值 818–1,002 MiB；findings 與第 9 項相同。七組 4 MiB 以 `--compare-reference` 逐筆與 C1 一致。
+

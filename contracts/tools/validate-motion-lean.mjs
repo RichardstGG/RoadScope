@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { hostname, tmpdir } from 'node:os';
 import Ajv2020 from 'ajv/dist/2020.js';
-import { BufferInput, CancelledError, CapacityError, DEFAULT_MAX_LINE_BYTES, FileInput, FileSink, MemorySink, ResourceGuard, prefixDigest } from './lib/io.mjs';
+import { BufferInput, CancelledError, CapacityError, DEFAULT_MAX_LINE_BYTES, FileInput, FileSink, MemorySink, ResourceGuard, TeeSink, openFindingsOutput, prefixDigest, prefixDigestAsync } from './lib/io.mjs';
 import { MemoryStore, SqliteStore } from './lib/store.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -276,15 +276,21 @@ function runSync(validator, input, store, maxLineBytes) {
   return validator.end();
 }
 
-async function runAsync(validator, input, store, { maxLineBytes, guard }) {
+const yieldToEvents = () => new Promise((done) => setImmediate(done));
+
+// `progress.line` tracks the line being validated, so an interrupted run can say where it stopped.
+async function runAsync(validator, input, store, { maxLineBytes, guard, progress = {}, parentInput = null }) {
   let count = 0;
   for (const item of input.lines(maxLineBytes)) {
+    progress.line = item.line;
     store.tick();
     validator.line(item);
     guard.check(item.offset);
     count += 1;
-    if (count % 4096 === 0) await new Promise((done) => setImmediate(done));
+    if (count % 4096 === 0) await yieldToEvents();
   }
+  const parentLength = validator.parentLength?.() ?? null;
+  if (parentLength !== null && parentInput) validator.setParentDigest(await prefixDigestAsync(parentInput, parentLength, guard));
   return validator.end();
 }
 
@@ -945,7 +951,16 @@ function createLeanValidator({ version, store, input, sink, motion: pairedMotion
     motion = null;
   }
 
+  let parentDigest = null;
   return {
+    // --parent: how many bytes of the parent the lean log asks to be hashed (known once lean_started
+    // is read), so that the CLI can hash it in chunks under the resource guard before end().
+    parentLength() {
+      return parent && state.startedRecord?.derivesFrom ? state.startedRecord.derivesFrom.parentByteLength : null;
+    },
+    setParentDigest(digest) {
+      parentDigest = digest;
+    },
     line(item) {
       const record = parseRecord(item.raw, item.line, LEAN_RECORD_TYPES, add, counters);
       if (record === null) return;
@@ -991,7 +1006,7 @@ function createLeanValidator({ version, store, input, sink, motion: pairedMotion
     },
     end() {
       V = version;
-      if (V === 2) finishLeanV2(state, add, motion, parent);
+      if (V === 2) finishLeanV2(state, add, motion, parent, parentDigest);
       return finish(report, {
         kind: 'lean',
         version,
@@ -1022,7 +1037,7 @@ function checkRunId(state, record, line, add) {
   return true;
 }
 
-function finishLeanV2(state, add, motion, parent) {
+function finishLeanV2(state, add, motion, parent, parentDigest = null) {
   const auto = state.auto;
   const scope = state.startedRecord?.replayScope;
   settleAtBoundary(state, add, state.lastLine, 'end of file');
@@ -1050,8 +1065,8 @@ function finishLeanV2(state, add, motion, parent) {
   }
   const parentInfo = state.startedRecord?.derivesFrom;
   if (parentInfo && parent) {
-    // `parent` is a Buffer (library) or a path (CLI); a path is hashed in chunks.
-    const digest = prefixDigest(parent, parentInfo.parentByteLength);
+    // `parent` is a Buffer (library), or the CLI hashed the file beforehand (parentDigest).
+    const digest = parentDigest ?? prefixDigest(parent, parentInfo.parentByteLength);
     if (digest.size < parentInfo.parentByteLength || digest.sha256 !== parentInfo.parentPrefixSha256) {
       add('DERIVED_RUN_PARENT_MISMATCH', 1, 'parent prefix length or SHA-256 differs from derivesFrom');
     }
@@ -1632,37 +1647,51 @@ function applySegmentClosed(state, record, line, add) {
 
 // ---------------------------------------------------------------- file API
 
-// Validates one file. Lines are streamed; `index: 'disk'` keeps the index in an on-disk SQLite store
-// under `tmp` so memory does not grow with the input. Throws CapacityError / CancelledError.
-export async function validateFile(path, kind, { index = 'disk', tmp = null, motion = null, parent = null, sink = null, guard = new ResourceGuard(), maxLineBytes = DEFAULT_MAX_LINE_BYTES } = {}) {
-  const input = new FileInput(path);
-  try {
-    const version = detectSchemaVersion(input) ?? 1;
-    if (!SUPPORTED_VERSIONS.includes(version)) return { result: unsupportedResult(kind, version, sink ?? undefined), store: null };
-    const store = index === 'disk' ? new SqliteStore(join(tmp, `index-${process.hrtime.bigint()}.sqlite`)) : new MemoryStore();
-    const validator =
-      kind === 'motion'
-        ? createMotionValidator({ version, store, input, sink: sink ?? undefined })
-        : createLeanValidator({ version, store, input, sink: sink ?? undefined, motion, parent });
-    const result = await runAsync(validator, input, store, { maxLineBytes, guard });
-    return { result, store };
-  } finally {
-    input.close();
+// One streaming pass that finds both the schemaVersion (first record with an integer schemaVersion) and
+// the kind (first record with a known recordType), under the same line limit and resource guard as the
+// validation itself: an oversized or junk prefix is refused while it is read, never assembled first.
+export async function probeFile(input, { maxLineBytes = DEFAULT_MAX_LINE_BYTES, guard = new ResourceGuard() } = {}) {
+  let version = null;
+  let kind = null;
+  let count = 0;
+  for (const { raw, offset } of input.lines(maxLineBytes)) {
+    guard.check(offset);
+    count += 1;
+    if (count % 4096 === 0) await yieldToEvents();
+    if (raw.trim() === '') continue;
+    let record;
+    try {
+      record = JSON.parse(raw);
+    } catch {
+      continue; // a corrupt line must not hide the log's kind or version
+    }
+    if (version === null && record && Number.isInteger(record.schemaVersion)) version = record.schemaVersion;
+    if (kind === null) {
+      const type = record?.recordType;
+      if (MOTION_RECORD_TYPES.has(type)) kind = 'motion';
+      else if (LEAN_RECORD_TYPES.has(type)) kind = 'lean';
+    }
+    if (version !== null && kind !== null) break;
   }
+  return { version: version ?? 1, kind };
 }
 
-function detectKind(input) {
-  for (const { raw } of input.lines(Number.MAX_SAFE_INTEGER)) {
-    if (raw.trim() === '') continue;
-    try {
-      const type = JSON.parse(raw)?.recordType;
-      if (MOTION_RECORD_TYPES.has(type)) return 'motion';
-      if (LEAN_RECORD_TYPES.has(type)) return 'lean';
-    } catch {
-      // Keep looking: a corrupt first line must not hide the log's kind.
-    }
+// Validates one already-opened file. `index: 'disk'` keeps the index in an on-disk SQLite store under
+// `tmp`. Throws CapacityError / CancelledError / IO errors; whatever was found before stays in `sink`.
+export async function validateFile(input, kind, version, { index = 'disk', tmp = null, motion = null, parentInput = null, sink, guard = new ResourceGuard(), maxLineBytes = DEFAULT_MAX_LINE_BYTES, progress = {} } = {}) {
+  if (!SUPPORTED_VERSIONS.includes(version)) return { result: unsupportedResult(kind, version, sink), store: null };
+  const store = index === 'disk' ? new SqliteStore(join(tmp, `index-${process.hrtime.bigint()}.sqlite`)) : new MemoryStore();
+  try {
+    const validator =
+      kind === 'motion'
+        ? createMotionValidator({ version, store, input, sink })
+        : createLeanValidator({ version, store, input, sink, motion, parent: parentInput });
+    const result = await runAsync(validator, input, store, { maxLineBytes, guard, progress, parentInput });
+    return { result, store };
+  } catch (error) {
+    store.close();
+    throw error;
   }
-  return null;
 }
 
 // ---------------------------------------------------------------- CLI
@@ -1676,6 +1705,7 @@ const TMP_PREFIX = 'roadscope-validate-';
 const OWNER_FILE = 'owner.json';
 const AUTO_DISK_BYTES = 16 * 1024 * 1024;
 const SUMMARY_FINDINGS = 100;
+const INCOMPLETE_CODE = 'VALIDATION_INCOMPLETE';
 
 function parseArgs(argv) {
   const options = { json: false, summary: false, findingsOut: null, tmpDir: null, index: 'auto', maxLineBytes: DEFAULT_MAX_LINE_BYTES, rssLimitMiB: 240, motion: null, parent: null, files: [] };
@@ -1698,6 +1728,7 @@ function parseArgs(argv) {
     else options.files.push(arg);
   }
   if (!['auto', 'memory', 'disk'].includes(options.index)) throw new Error('--index must be auto, memory or disk');
+  if (!(options.maxLineBytes > 0)) throw new Error('--max-line-bytes must be a positive number');
   if (options.json && options.summary) throw new Error('--json and --summary are exclusive');
   if (options.summary && !options.findingsOut) throw new Error('--summary needs --findings-out: the complete findings must go somewhere');
   if (options.files.length === 0) throw new Error('no input file');
@@ -1744,21 +1775,36 @@ function findingLine(f) {
 
 // Buffered stdout with backpressure: a pipe that reads slowly must not make queued output pile up in
 // memory, and the process must not exit before it is drained (C1's process.exit() right after writing
-// truncated large outputs on pipes).
-function createOutput(stream) {
+// truncated large outputs on pipes). A cancellation is honoured while output drains, too.
+function createOutput(stream, guard) {
   let buffer = '';
+  let writes = 0;
   const flush = async () => {
-    if (buffer === '') return;
-    const ok = stream.write(buffer);
-    buffer = '';
-    if (!ok) await new Promise((done) => stream.once('drain', done));
+    if (buffer !== '') {
+      const ok = stream.write(buffer);
+      buffer = '';
+      if (!ok) await Promise.race([new Promise((done) => stream.once('drain', done)), guard.whenCancelled]);
+    }
+    guard.throwIfCancelled();
   };
   return {
     async write(text) {
+      guard.throwIfCancelled();
       buffer += text;
+      writes += 1;
       if (buffer.length >= 64 * 1024) await flush();
+      else if (writes % 256 === 0) await yieldToEvents(); // let a signal be seen even when nothing blocks
     },
     flush,
+    // Waits until everything written has left the process, still honouring a cancellation: output that
+    // is queued but not yet read is not "done".
+    async drained() {
+      await flush();
+      while (stream.writableLength > 0) {
+        await Promise.race([new Promise((done) => setTimeout(done, 20)), guard.whenCancelled]);
+        guard.throwIfCancelled();
+      }
+    },
   };
 }
 
@@ -1793,6 +1839,18 @@ class JsonWriter {
   }
 }
 
+// Why a run did not complete, as an exit code and a reason; null for an error that is a bug.
+function interruption(error) {
+  if (error instanceof CancelledError) return { exit: 130, code: 'CANCELLED', message: 'cancelled' };
+  if (error instanceof CapacityError) return { exit: 3, code: error.code, message: error.message };
+  const code = String(error?.code ?? '');
+  const io = ['ENOSPC', 'EFBIG', 'EDQUOT', 'EACCES', 'EPERM', 'EIO', 'EMFILE', 'ENOENT', 'EISDIR', 'EROFS', 'MODULE_NOT_FOUND', 'ERR_DLOPEN_FAILED'];
+  if (io.includes(code) || code.startsWith('SQLITE_') || /better-sqlite3/.test(String(error?.message))) {
+    return { exit: 3, code: code || 'IO', message: error.message };
+  }
+  return null;
+}
+
 async function main(argv) {
   let options;
   try {
@@ -1803,24 +1861,49 @@ async function main(argv) {
   }
 
   const guard = new ResourceGuard({ rssLimitBytes: options.rssLimitMiB > 0 ? options.rssLimitMiB * 2 ** 20 : 0 });
-  const onSignal = () => {
-    guard.cancelled = true;
-  };
+  const onSignal = () => guard.cancel();
   process.on('SIGINT', onSignal);
   process.on('SIGTERM', onSignal);
 
-  const output = createOutput(process.stdout);
+  const output = createOutput(process.stdout, guard);
   const out = (text) => output.write(text);
-  const tmpParent = resolve(options.tmpDir ?? tmpdir());
-  let tmp = null;
+  const inputs = [];
   const stores = [];
   const sinks = [];
+  let tmp = null;
   let findingsOut = null;
+  const current = { file: null, kind: null, sink: null, progress: { line: 0 } };
+  let json = null;
   try {
-    const sizes = [options.motion, ...options.files].filter(Boolean).map((p) => statSync(p).size);
-    const total = sizes.reduce((a, b) => a + b, 0);
-    const index = options.index === 'auto' ? (total >= AUTO_DISK_BYTES ? 'disk' : 'memory') : options.index;
+    // Open every input first: the descriptors read later are the files whose identity is checked.
+    let listed;
+    let motionInput = null;
+    let parentInput = null;
+    try {
+      listed = options.files.map((path) => new FileInput(path));
+      inputs.push(...listed);
+      if (options.motion) inputs.push((motionInput = new FileInput(options.motion)));
+      if (options.parent) inputs.push((parentInput = new FileInput(options.parent)));
+    } catch (error) {
+      process.stderr.write(`IO ${error.code ?? 'ERROR'}: ${error.message} (validation did not start; this is not a pass)\n`);
+      return 3;
+    }
+    if (options.findingsOut) {
+      try {
+        findingsOut = new FileSink(options.findingsOut, { fd: openFindingsOutput(options.findingsOut, inputs), decorate: (f) => ({ file: current.file, ...f }) });
+      } catch (error) {
+        if (error.code === 'FINDINGS_OUTPUT_IS_INPUT') {
+          process.stderr.write(`${error.message}\n`);
+          return 2;
+        }
+        process.stderr.write(`IO ${error.code ?? 'ERROR'}: --findings-out ${options.findingsOut}: ${error.message} (validation did not start; this is not a pass)\n`);
+        return 3;
+      }
+    }
 
+    const total = inputs.reduce((sum, input) => sum + input.size, 0);
+    const index = options.index === 'auto' ? (total >= AUTO_DISK_BYTES ? 'disk' : 'memory') : options.index;
+    const tmpParent = resolve(options.tmpDir ?? tmpdir());
     for (const dir of cleanStaleTemps(tmpParent)) process.stderr.write(`removed stale temporary directory ${dir}\n`);
     tmp = mkdtempSync(join(tmpParent, TMP_PREFIX));
     writeFileSync(join(tmp, OWNER_FILE), JSON.stringify({ pid: process.pid, host: hostname(), startedAt: new Date().toISOString() }), { mode: 0o600 });
@@ -1831,66 +1914,79 @@ async function main(argv) {
       const needed = Math.max(512 * 2 ** 20, total);
       if (free < needed) throw new CapacityError('DISK_FULL', `${Math.round(free / 2 ** 20)} MiB free in ${tmpParent}; an index for ${Math.round(total / 2 ** 20)} MiB of input needs about ${Math.round(needed / 2 ** 20)} MiB`);
     }
-    if (options.findingsOut) findingsOut = new FileSink(options.findingsOut);
+    json = options.json ? new JsonWriter(out) : null;
+    const options_ = { index, tmp, guard, maxLineBytes: options.maxLineBytes };
 
+    // The --motion log first (later lean files are paired with it). Its findings go to --findings-out
+    // only where the C1 output order puts them: now if it is also the first listed file, else when listed.
     let motion = null;
-    if (options.motion) {
-      const sink = new FileSink(join(tmp, 'findings-motion.jsonl'));
-      sinks.push(sink);
-      const { result, store } = await validateFile(options.motion, 'motion', { index, tmp, sink, guard, maxLineBytes: options.maxLineBytes });
+    if (motionInput) {
+      const streamNow = listed[0]?.identity === motionInput.identity;
+      const sink = new TeeSink(new FileSink(join(tmp, 'findings-motion.jsonl')), streamNow ? findingsOut : null);
+      sinks.push(sink.primary);
+      Object.assign(current, { file: streamNow ? options.files[0] : options.motion, kind: 'motion', sink, progress: { line: 0 } });
+      const { version } = await probeFile(motionInput, options_);
+      const { result, store } = await validateFile(motionInput, 'motion', version, { ...options_, sink, progress: current.progress });
       if (store) {
         stores.push(store);
         store.idle(); // kept for pairing; holds no cache while other files are validated
       }
-      motion = { result, sink, path: resolve(options.motion) };
+      motion = { result, sink, streamed: streamNow };
     }
 
-    const json = options.json ? new JsonWriter(out) : null;
     let failed = false;
     let unsupported = false;
-    for (const [n, file] of options.files.entries()) {
-      const probe = new FileInput(file);
-      let kind;
-      try {
-        kind = detectKind(probe);
-      } finally {
-        probe.close();
-      }
-      if (kind === null) {
-        process.stderr.write(`${file}: no motion_* or lean_* record found\n`);
-        failed = true;
-        continue;
-      }
+    for (const [n, input] of listed.entries()) {
+      const file = options.files[n];
       let sink;
       let result;
-      if (motion && resolve(file) === motion.path) {
+      let kind;
+      if (motion && input.identity === motionInput.identity) {
         // The --motion file listed again: the same file, the same result; do not validate it twice.
         ({ sink, result } = motion);
+        kind = 'motion';
+        current.file = file;
+        if (findingsOut && !(motion.streamed && n === 0)) {
+          for (const f of sink.all(4 * options.maxLineBytes + 4096)) {
+            guard.check(0);
+            findingsOut.push(f);
+          }
+        }
       } else {
-        sink = new FileSink(join(tmp, `findings-${n}.jsonl`));
-        sinks.push(sink);
+        Object.assign(current, { file, kind: null, sink: null, progress: { line: 0 } });
+        const probe = await probeFile(input, options_);
+        if (probe.kind === null) {
+          process.stderr.write(`${file}: no motion_* or lean_* record found\n`);
+          failed = true;
+          continue;
+        }
+        kind = probe.kind;
+        sink = new TeeSink(new FileSink(join(tmp, `findings-${n}.jsonl`)), findingsOut);
+        sinks.push(sink.primary);
+        Object.assign(current, { kind, sink });
         let store;
-        ({ result, store } = await validateFile(file, kind, { index, tmp, sink, guard, maxLineBytes: options.maxLineBytes, motion: kind === 'lean' ? motion?.result ?? null : null, parent: kind === 'lean' ? options.parent : null }));
-        // Only the --motion index outlives its file (later lean files are paired with it): close the rest
-        // now, so memory holds at most two indexes whatever the number of files.
+        ({ result, store } = await validateFile(input, kind, probe.version, { ...options_, sink, progress: current.progress, motion: kind === 'lean' ? motion?.result ?? null : null, parentInput: kind === 'lean' ? parentInput : null }));
+        // Only the --motion index outlives its file: close the rest now, so memory holds at most two indexes.
         if (store) store.close();
         motion?.result.model?.store?.idle();
       }
-      // Same keys, same order as the C1 output; findings are streamed in place.
-      const entry = { file };
-      for (const [key, v] of Object.entries(result)) if (key !== 'model' && key !== 'findingsFile') entry[key] = v;
+      current.sink = null; // this file is complete
+      findingsOut?.flush();
       if (!result.ok) failed = true;
       if (result.unsupported) unsupported = true;
 
-      if (findingsOut) for (const f of sink.all()) findingsOut.push({ file, ...f });
+      // Same keys, same order as the C1 output; findings are streamed in place.
+      const entry = { file };
+      for (const [key, v] of Object.entries(result)) if (key !== 'model' && key !== 'findingsFile') entry[key] = v;
+      const replayLimit = 4 * options.maxLineBytes + 4096;
       if (json) {
-        await json.result(entry, sink.all());
+        await json.result(entry, sink.all(replayLimit));
         continue;
       }
       const count = kind === 'motion' ? `${result.samples} samples` : `${result.records} records`;
       await out(`${result.ok ? 'PASS' : 'FAIL'} ${file} [${kind}] - ${count}, ${result.events} events, ${result.errorCount} error(s), ${result.warnCount} warning(s)\n`);
       let shown = 0;
-      for (const f of sink.all()) {
+      for (const f of sink.all(replayLimit)) {
         if (options.summary && shown >= SUMMARY_FINDINGS) {
           await out(`  ... ${result.errorCount + result.warnCount - shown} more finding(s) in ${options.findingsOut}\n`);
           break;
@@ -1900,29 +1996,24 @@ async function main(argv) {
       }
     }
     if (json) await json.end();
-    await output.flush();
+    await output.drained();
     if (findingsOut) findingsOut.close();
     if (unsupported) return 4;
     return failed ? 1 : 0;
   } catch (error) {
-    if (error instanceof CancelledError) {
-      process.stderr.write('cancelled\n');
-      return 130;
-    }
-    if (error instanceof CapacityError) {
-      process.stderr.write(`CAPACITY ${error.code}: ${error.message} (validation did not complete; this is not a pass)\n`);
-      return 3;
-    }
-    const io = ['ENOSPC', 'EACCES', 'EPERM', 'EIO', 'EMFILE', 'ENOENT', 'EISDIR', 'SQLITE_FULL', 'SQLITE_IOERR', 'SQLITE_CANTOPEN', 'MODULE_NOT_FOUND', 'ERR_DLOPEN_FAILED'];
-    if (io.includes(error.code) || /SQLITE_FULL|SQLITE_IOERR|better-sqlite3/.test(String(error.message))) {
-      process.stderr.write(`IO ${error.code ?? 'ERROR'}: ${error.message} (validation did not complete; this is not a pass)\n`);
-      return 3;
-    }
-    throw error;
+    const stop = interruption(error);
+    if (!stop) throw error;
+    // `return await`: the report needs the temporary findings, which `finally` removes.
+    return await reportIncomplete(stop, { current, findingsOut, json, out, output, guard, options });
   } finally {
     for (const sink of sinks) sink.close();
-    if (findingsOut) findingsOut.close();
+    try {
+      findingsOut?.close();
+    } catch {
+      // already reported
+    }
     for (const store of stores) store.close();
+    for (const input of inputs) input.close();
     if (tmp) {
       try {
         rmSync(tmp, { recursive: true, force: true });
@@ -1931,12 +2022,67 @@ async function main(argv) {
       }
     }
     if (process.env.ROADSCOPE_VALIDATOR_STATS) {
+      // vmHwmKiB: this process's own peak resident set (Linux /proc, reset at exec). maxRssKiB: getrusage,
+      // which on Linux survives execve and so also counts the parent's image at fork; the stricter bound.
       const usage = process.resourceUsage();
-      process.stderr.write(`STATS ${JSON.stringify({ maxRssKiB: usage.maxRSS, peakSampledRssBytes: guard.peakRss, userMs: Math.round(usage.userCPUTime / 1000), systemMs: Math.round(usage.systemCPUTime / 1000) })}\n`);
+      let vmHwmKiB = null;
+      try {
+        vmHwmKiB = Number(readFileSync('/proc/self/status', 'utf8').match(/VmHWM:\s+(\d+)/)?.[1] ?? NaN) || null;
+      } catch {
+        // not Linux
+      }
+      process.stderr.write(`STATS ${JSON.stringify({ vmHwmKiB, maxRssKiB: usage.maxRSS, peakSampledRssBytes: guard.peakRss, userMs: Math.round(usage.userCPUTime / 1000), systemMs: Math.round(usage.systemCPUTime / 1000) })}\n`);
     }
     process.off('SIGINT', onSignal);
     process.off('SIGTERM', onSignal);
   }
+}
+
+// An interrupted run (exit 3 or 130) keeps what it found: the file in progress is reported as
+// INCOMPLETE with its findings so far (stdout, or a valid --json entry with "complete": false), and
+// --findings-out — already holding them, streamed while validating — ends with a VALIDATION_INCOMPLETE
+// record. Never a PASS. A second cancellation while this drains stops it at once.
+async function reportIncomplete(stop, { current, findingsOut, json, out, output, guard, options }) {
+  process.stderr.write(`${stop.exit === 130 ? 'CANCELLED' : `CAPACITY ${stop.code}`}: ${stop.message} (validation did not complete; this is not a pass)\n`);
+  const where = { file: current.file, line: current.progress.line };
+  if (findingsOut) {
+    try {
+      findingsOut.push({ code: INCOMPLETE_CODE, severity: 'error', line: where.line, detail: `validation stopped (${stop.code}): ${stop.message}` });
+      findingsOut.flush();
+    } catch (error) {
+      process.stderr.write(`could not complete --findings-out: ${error.message}\n`);
+    }
+  }
+  const sink = current.sink;
+  // Stopped before any file, or while writing the output of a file whose validation had completed
+  // (then stdout is simply cut short): nothing partial to report.
+  if (where.file === null || sink === null) return stop.exit;
+  guard.rearm(); // the first cancellation is this stop; a further one aborts the report
+  try {
+    const total = sink ? sink.total : 0;
+    const findings = sink ? sink.all(4 * options.maxLineBytes + 4096) : [];
+    if (json) {
+      const entry = { file: where.file, ok: false, complete: false, stoppedAtLine: where.line, reason: stop.code, kind: current.kind, errorCount: sink ? sink.errors : 0, warnCount: sink ? sink.total - sink.errors : 0 };
+      await json.result(entry, findings);
+      await json.end();
+    } else {
+      await out(`INCOMPLETE ${where.file} [${current.kind ?? 'unknown'}] - stopped at line ${where.line} (${stop.code}); ${total} finding(s) before stopping; this is not a pass\n`);
+      let shown = 0;
+      for (const f of findings) {
+        if (options.summary && shown >= SUMMARY_FINDINGS) {
+          await out(`  ... ${total - shown} more finding(s) in ${options.findingsOut}\n`);
+          break;
+        }
+        await out(findingLine(f));
+        shown += 1;
+      }
+    }
+    await output.drained();
+  } catch (error) {
+    if (!(error instanceof CancelledError)) process.stderr.write(`could not write the partial report: ${error.message}\n`);
+    return error instanceof CancelledError ? 130 : stop.exit;
+  }
+  return stop.exit;
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
@@ -1947,7 +2093,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1
     },
     (error) => {
       process.stderr.write(`${error.stack ?? error}\n`);
-      process.exit(3);
+      process.exitCode = 3;
     },
   );
 }

@@ -3,7 +3,7 @@
 // Splitting on the 0x0A byte and decoding each line equals decoding the whole file and splitting on
 // '\n' (0x0A never occurs inside a multi-byte UTF-8 sequence), so both readers yield the same lines.
 
-import { closeSync, fstatSync, openSync, readSync, statfsSync, writeSync } from 'node:fs';
+import { closeSync, constants, fstatSync, ftruncateSync, openSync, readSync, statfsSync, writeSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 
 export const DEFAULT_MAX_LINE_BYTES = 1024 * 1024;
@@ -48,10 +48,20 @@ export class BufferInput {
 }
 
 export class FileInput {
+  // The descriptor is opened once and used for everything (probing, validating, re-reading, hashing):
+  // the identity checked against the findings output is the file actually read.
   constructor(path) {
     this.path = path;
     this.fd = openSync(path, 'r');
-    this.size = fstatSync(this.fd).size;
+    const stat = fstatSync(this.fd);
+    if (stat.isDirectory()) {
+      closeSync(this.fd);
+      const error = new Error(`${path} is a directory`);
+      error.code = 'EISDIR';
+      throw error;
+    }
+    this.size = stat.size;
+    this.identity = `${stat.dev}:${stat.ino}`;
   }
 
   // Yields the same sequence as BufferInput over the whole file, holding at most one line plus one chunk.
@@ -99,8 +109,48 @@ export class FileInput {
   }
 
   close() {
+    if (this.fd === null) return;
     closeSync(this.fd);
+    this.fd = null;
   }
+}
+
+// Opens the findings output WITHOUT truncating it, checks the identity of the open descriptor against
+// every input (same path, relative path, symlink and hardlink all resolve to the same dev:ino), and
+// truncates only after that check, through the same descriptor: nothing can swap the file in between.
+export function openFindingsOutput(path, inputs) {
+  const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT, 0o600);
+  const stat = fstatSync(fd);
+  const identity = `${stat.dev}:${stat.ino}`;
+  const clash = inputs.find((input) => input.identity === identity);
+  if (clash) {
+    closeSync(fd);
+    const error = new Error(`--findings-out ${path} is the same file as the input ${clash.path}; refusing to overwrite an input`);
+    error.code = 'FINDINGS_OUTPUT_IS_INPUT';
+    throw error;
+  }
+  // A regular file is emptied; a device or a pipe (/dev/stdout, a FIFO) is written as is.
+  if (stat.isFile()) ftruncateSync(fd, 0);
+  return fd;
+}
+
+// SHA-256 of the first `length` bytes of a FileInput, in chunks, under the resource guard; yields to the
+// event loop so that a cancellation is seen while hashing a large parent.
+export async function prefixDigestAsync(input, length, guard) {
+  const hash = createHash('sha256');
+  const chunk = Buffer.allocUnsafe(CHUNK);
+  let position = 0;
+  let chunks = 0;
+  while (position < Math.min(length, input.size)) {
+    const read = readSync(input.fd, chunk, 0, Math.min(CHUNK, length - position), position);
+    if (read === 0) break;
+    hash.update(chunk.subarray(0, read));
+    position += read;
+    chunks += 1;
+    guard.checkNow(position);
+    if (chunks % 256 === 0) await new Promise((done) => setImmediate(done));
+  }
+  return { size: input.size, sha256: hash.digest('hex') };
 }
 
 // SHA-256 of the first `length` bytes and the total size, without loading the file.
@@ -151,9 +201,10 @@ export class MemorySink {
 // Streams every finding to a JSONL file as it is found; memory keeps only counts. The CLI replays the
 // file afterwards, so the complete list is always available and memory does not grow with it.
 export class FileSink {
-  constructor(path) {
+  constructor(path, { fd = null, decorate = null } = {}) {
     this.path = path;
-    this.fd = openSync(path, 'w', 0o600);
+    this.fd = fd ?? openSync(path, 'w', 0o600);
+    this.decorate = decorate; // e.g. add the input file to each finding
     this.buffer = [];
     this.bufferBytes = 0;
     this.errors = 0;
@@ -162,7 +213,7 @@ export class FileSink {
   }
 
   push(finding) {
-    const text = `${JSON.stringify(finding)}\n`;
+    const text = `${JSON.stringify(this.decorate ? this.decorate(finding) : finding)}\n`;
     this.buffer.push(text);
     this.bufferBytes += text.length;
     this.total += 1;
@@ -184,14 +235,59 @@ export class FileSink {
     this.fd = null;
   }
 
-  *all() {
-    this.close();
+  // Replays the findings. A finding line is bounded by the input line it describes (detail strings come
+  // from at most one record), so the replay uses a bound derived from the input line limit.
+  *all(maxLineBytes = 4 * DEFAULT_MAX_LINE_BYTES + 4096) {
+    this.flush();
     const input = new FileInput(this.path);
     try {
-      for (const { raw } of input.lines(Number.MAX_SAFE_INTEGER)) if (raw !== '') yield JSON.parse(raw);
+      for (const { raw } of input.lines(maxLineBytes)) if (raw !== '') yield JSON.parse(raw);
     } finally {
       input.close();
     }
+  }
+}
+
+// Writes to two sinks: the replay sink of one file and, when asked, the user's --findings-out (streamed
+// while validating, so findings found before a failure are kept).
+export class TeeSink {
+  constructor(primary, secondary) {
+    this.primary = primary;
+    this.secondary = secondary;
+  }
+
+  get path() {
+    return this.primary.path;
+  }
+
+  get errors() {
+    return this.primary.errors;
+  }
+
+  get total() {
+    return this.primary.total;
+  }
+
+  get findings() {
+    return [];
+  }
+
+  push(finding) {
+    this.primary.push(finding);
+    if (this.secondary) this.secondary.push(finding);
+  }
+
+  flush() {
+    this.primary.flush();
+    if (this.secondary) this.secondary.flush();
+  }
+
+  close() {
+    this.flush();
+  }
+
+  all(maxLineBytes) {
+    return this.primary.all(maxLineBytes);
   }
 }
 
@@ -210,12 +306,34 @@ export class ResourceGuard {
     this.nextBytes = everyBytes;
     this.peakRss = 0;
     this.cancelled = false;
+    this.rearm();
+  }
+
+  // A promise that settles on cancellation, to race against waits (e.g. a stdout drain).
+  rearm() {
+    this.cancelled = false;
+    this.whenCancelled = new Promise((done) => {
+      this.resolveCancel = done;
+    });
+  }
+
+  cancel() {
+    this.cancelled = true;
+    this.resolveCancel();
   }
 
   check(offset) {
     this.lines += 1;
     if (this.lines % this.everyLines !== 0) return;
+    this.checkNow(offset);
+  }
+
+  throwIfCancelled() {
     if (this.cancelled) throw new CancelledError('cancelled');
+  }
+
+  checkNow(offset) {
+    this.throwIfCancelled();
     const rss = process.memoryUsage.rss();
     if (rss > this.peakRss) this.peakRss = rss;
     if (this.rssLimitBytes && rss > this.rssLimitBytes) {
