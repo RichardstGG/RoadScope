@@ -55,15 +55,40 @@ try {
     { exit: incomplete.status, retainedNotJson: saved.includes('NOT_JSON') });
 
   const oversized = path.join(work, 'oversized-first-line.ndjson');
-  fs.writeFileSync(oversized, Buffer.concat([
-    Buffer.alloc(64 * 1024 * 1024, 120), Buffer.from('\n'), base,
-  ]));
+  // Keep the test parent small too: Linux getrusage can include its image at fork.
+  const fd = fs.openSync(oversized, 'w');
+  try {
+    const chunk = Buffer.alloc(64 * 1024, 120);
+    for (let i = 0; i < 1024; i++) fs.writeSync(fd, chunk);
+    fs.writeSync(fd, Buffer.concat([Buffer.from('\n'), base]));
+  } finally { fs.closeSync(fd); }
   const capacity = run([oversized]);
   const stats = JSON.parse(capacity.stderr.match(/STATS (.*)/)?.[1] ?? '{}');
-  const rssMiB = stats.maxRssKiB / 1024;
+  const rssMiB = Math.max(stats.maxRssKiB ?? Infinity, stats.vmHwmKiB ?? 0) / 1024;
   check('C2-3: enforce line cap before kind/version detection allocates oversized line',
-    capacity.status === 3 && /LINE_TOO_LONG/.test(capacity.stderr) && rssMiB <= 256,
-    { exit: capacity.status, peakRssMiB: rssMiB });
+    capacity.status === 3 && /LINE_TOO_LONG/.test(capacity.stderr) && rssMiB > 0 && rssMiB <= 256,
+    { exit: capacity.status, peakRssMiB: rssMiB, vmHwmMiB: stats.vmHwmKiB / 1024 });
+
+  const first = path.join(work, 'completed-first.ndjson');
+  fs.writeFileSync(first, Buffer.concat([base, Buffer.from('not-json\n')]));
+  const second = path.join(work, 'probe-failure.ndjson');
+  fs.writeFileSync(second, Buffer.alloc(1024 * 1024 + 1, 120));
+  const multiText = run([first, second]);
+  check('C2-4: retain completed text results when next file fails probing',
+    multiText.status === 3 && multiText.stdout.includes('NOT_JSON') &&
+      multiText.stdout.includes('INCOMPLETE') && multiText.stdout.includes(second),
+    { exit: multiText.status, stdoutBytes: Buffer.byteLength(multiText.stdout) });
+  for (const files of [[second], [first, second]]) {
+    const result = run(['--json', ...files]);
+    let entries;
+    try { entries = JSON.parse(result.stdout); } catch { /* assertion below */ }
+    check(`C2-4: finalise JSON after probe failure (${files.length} input file(s))`,
+      result.status === 3 && Array.isArray(entries) &&
+      entries.some((e) => e.file === second && e.complete === false) &&
+      (files.length === 1 || entries.some((e) => e.file === first &&
+        e.findings?.some((f) => f.code === 'NOT_JSON'))),
+      { exit: result.status, validJson: Array.isArray(entries), stdoutBytes: Buffer.byteLength(result.stdout) });
+  }
 
   const cancelDir = path.join(work, 'output-cancel');
   const generated = spawnSync(process.execPath, [path.join(root,
@@ -96,6 +121,37 @@ try {
   check('C2-3: honour SIGINT while findings output is draining',
     cancelled.signalled && cancelled.status === 130,
     { exit: cancelled.status, signal: cancelled.signal, sigintSent: cancelled.signalled });
+
+  const jsonCancelled = await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [cli, '--json', path.join(cancelDir, 'motion.ndjson')],
+      { stdio: ['ignore', 'pipe', 'pipe'] });
+    let signalled = false;
+    let stdout = '';
+    let resumeTimer;
+    const timeout = setTimeout(() => child.kill('SIGKILL'), 10_000);
+    child.stderr.resume();
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+      if (signalled) return;
+      signalled = true;
+      child.stdout.pause();
+      child.kill('SIGINT');
+      resumeTimer = setTimeout(() => child.stdout.resume(), 200);
+    });
+    child.on('error', reject);
+    child.on('close', (status, signal) => {
+      clearTimeout(timeout);
+      clearTimeout(resumeTimer);
+      let entries;
+      try { entries = JSON.parse(stdout); } catch { /* assertion below */ }
+      resolve({ status, signal, signalled, entries, stdout });
+    });
+  });
+  check('C2-4: finalise JSON after one SIGINT during output (stdout stays writable)',
+    jsonCancelled.signalled && jsonCancelled.status === 130 &&
+    Array.isArray(jsonCancelled.entries) && jsonCancelled.entries.some((e) => e.complete === false),
+    { exit: jsonCancelled.status, validJson: Array.isArray(jsonCancelled.entries),
+      sigintSent: jsonCancelled.signalled, stdoutBytes: Buffer.byteLength(jsonCancelled.stdout) });
 } finally {
   fs.rmSync(work, { recursive: true, force: true });
 }

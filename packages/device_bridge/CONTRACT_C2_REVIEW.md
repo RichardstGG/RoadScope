@@ -1,5 +1,88 @@
 # C2 有界驗證器復核
 
+## 最新復核：6f98f2c（2026-10-09）
+
+受審提交 `6f98f2c588f5d927cc89912687ceef2a5c635996`，分支 contracts/motion-lean-c2。
+**原六個反例已通過，C2 仍暫不驗收：剩餘 C2-4（P1）為跨階段報告收尾不完整。**
+本次只有 consumer 腳本及復核文件，手機 runtime 仍為 `63e1b91`。
+
+### 已確認的修正
+
+- 輸入先開啟，findings 輸出以不截斷開啟後，透過同一描述元核對 dev／ino 再截斷。
+  原三種別名均 exit 2，輸入雜湊不變；契約測試另涵蓋 --motion／--parent 及相對路徑。
+- 驗證中途中止的 NOT_JSON 已保留，指定輸出有 VALIDATION_INCOMPLETE；
+  文字與 JSON 在既有單檔驗證中止案例均保留部分結果。
+- 格式探測共用行長限制，64 MiB 首行已在累積超限時拒絕；文字輸出期間 SIGINT 為 130。
+
+### C2-4：沒有 active sink 時丟掉既有輸出，JSON 輸出中止未收尾（P1）
+
+固定提交的 `contracts/tools/validate-motion-lean.mjs`：
+1956 行在 probe 前設定 sink=null；1973 行在結果輸出前設定 sink=null；
+2059 行在 sink=null 時直接 return，跳過已有輸出排空、JSON 收尾及未完成項目。
+「沒有正在驗證的 findings sink」不能代表「沒有待交付的結果」。
+
+獨立合成反例（一次取消後 stdout 仍可寫，沒有第二次取消或 EPIPE）：
+
+| 情境 | exit | 實際輸出 | 應有行為 |
+|---|---:|---|---|
+| 第一檔完成且含 NOT_JSON，第二檔首行 >1 MiB，文字模式 | 3 | stdout 0 bytes | 保留第一檔結果，第二檔 INCOMPLETE |
+| 第一檔就在 probe 遇超長首行，--json | 3 | stdout 0 bytes | 合法 JSON，含未完成項目，kind 可未知 |
+| 第一檔完成且含 NOT_JSON，第二檔 probe 遇超長首行，--json | 3 | stdout 0 bytes | 保留第一檔 findings，附第二檔未完成項目並關閉 JSON |
+| 4 MiB many-findings 的 --json，首批輸出後送一次 SIGINT，暫停讀取 200 ms 再繼續 | 130 | 約 65 KiB 未關閉 JSON，JSON.parse 失敗 | 明確標示輸出未完成並有合法 JSON |
+
+請分開管理驗證進度與報告輸出進度，讓受控失敗共用收尾流程，不以 sink 是否存在決定
+是否交付報告。probe 前即建立目前檔案的未完成上下文；既有文字結果須排空；
+JSON writer 須知道自己正在輸出哪個項目，能在一次取消後完成結構收尾，並標示輸出未完成。
+不能只在目前提早 return 前補 json.end()：若取消發生於 json.result() 中間，項目本身也未關閉。
+成功輸出格式保持 C1 等價；再次取消或 stdout 本身失效可明列無法完成報告的例外。
+
+### 本輪證據
+
+- automated tests：21 location、274 v2 檔案一致、345 motion／lean、820 C1 等價、
+  56 CLI 失敗檢查全通過；四個 C1 consumer 反例仍全部被拒絕。
+- automated tests（consumer）：原六項通過，新增四項 C2-4 斷言失敗，腳本 exit 1。
+- automated tests（4 MiB）：七組 profile 對 C1 的 findings 全部一致。
+- static validation：六個變更檔案、描述元身分核對、tee／guard／JSON writer 與失敗清理生命週期。
+- mock／manual／hardware tests：未執行，未操作手機。
+- untested：Windows／macOS、契約 GitHub CI；--location／qualification registry 仍未實作。
+  私有 v1 的 PASS 是前輪 b298ea8 的實跑，本輪沒有重跑，不把它寫成 6f98f2c 的新證據。
+
+### RSS 量測修正
+
+本機實驗確認父行程的配置會影響子行程 getrusage：同一小子程式的 VmHWM 約 42,724 KiB，
+父行程持有 200 MiB 時，子程式 maxRSS 為 208,088 KiB；小父行程則兩值約 42,700 KiB。
+接受同時回報 VmHWM／getrusage 的修正，大檔仍取兩者較大值。
+consumer 的 64 MiB 首行改為逐 64 KiB 寫入，避免父行程自行配置大型緩衝；
+修正版實測兩種峰值均約 64.8 MiB（環境觀測，非承諾）。
+同一低記憶體父行程腳本重跑 b298ea8，首行案例仍約 320.2 MiB，
+確認前輪超過 256 MiB 的阻擋不是父行程緩衝造成的假象。
+
+### 本輪 2 GiB 獨立重跑
+
+固定提交的七組 **7／7 完整通過**，各為 2 GiB motion＋約 0.35 GB 配對 lean，
+以磁碟索引與預設安全網執行，沒有 exit 3／130；含錯誤的 profile 如預期 exit 1。
+兩種 RSS 指標本輪各組相同，下表列兩者較大值。
+
+| 合成 profile | exit | 峰值 RSS（MiB） | 耗時（秒） | 暫存峰值（MiB） |
+|---|---:|---:|---:|---:|
+| valid | 0 | 195.9 | 105.2 | 835 |
+| tail-corrupt | 1 | 191 | 101.7 | 835 |
+| long-duplicate | 1 | 187.4 | 105 | 837 |
+| session-churn | 0 | 193.1 | 99.7 | 820 |
+| dangling-refs | 1 | 191.6 | 102.5 | 835 |
+| clock-churn | 0 | 198.2 | 159.7 | 818 |
+| many-findings | 1 | 189.2 | 104 | 1001 |
+
+各組 findings 與前輪相同，many-findings 完整保存並核算 1,733,351 個警告與 173,336 個錯誤。
+這些完整完成案例不涵蓋 C2-4 的跨階段中止，不能代替其修正。
+本輪 Node 22.23.3／Linux；鎖檔與前輪一致，獨立副本沿用前輪安裝的相同依賴。
+耗時與磁碟用量僅為本機觀測。重跑命令見下方首輪記錄，使用本輪受審 checkout。
+
+使用者本輪不需指令或手機測試。下一步修正 C2-4 並復核；S1 仍是下一手機切片，
+不因此標記 S3／S4 或 PR #2 完成，C3 仍等待 S5。
+
+## 首輪復核：b298ea8（以下保留歷史證據）
+
 2026-10-09；契約分支 contracts/motion-lean-c2，提交
 `b298ea8e569d7c92453eb1a2f936772996dbeaa4`，基於已接受 C1 `36662fa`。
 Codex runtime 仍為 `63e1b91`；本輪只有審查及合成反例，不改契約或手機程式。
