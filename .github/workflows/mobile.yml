@@ -63,6 +63,19 @@ jobs:
           node-version: '22'
       - run: npm ci --prefix contracts/tools
       - run: node contracts/tools/validate-location-log.mjs apps/mobile/build/device_bridge/native-log-fixtures/*.ndjson
+      # Pending contract PR #10: pin the reviewed schema, not its moving branch.
+      - uses: actions/checkout@v7
+        with:
+          ref: 747493332c2dd59044a425508387b3b4d31ab24e
+          path: motion-contract
+      - run: npm ci --prefix motion-contract/contracts/tools
+      - run: node motion-contract/contracts/tools/validate-motion-lean.mjs apps/mobile/build/device_bridge/native-motion-fixtures/*.ndjson
+      - name: Validate native lean and raw pairs
+        run: |
+          for motion in apps/mobile/build/device_bridge/native-lean-fixtures/*.motion.ndjson; do
+            node motion-contract/contracts/tools/validate-motion-lean.mjs "$motion"
+            node motion-contract/contracts/tools/validate-motion-lean.mjs --motion "$motion" "${motion%.motion.ndjson}.lean.ndjson"
+          done
       # Diagnostics telemetry is a separate format with its own reader; running
       # it here keeps the Kotlin writer and the Dart reader aligned.
       - run: dart run bin/inspect_telemetry.dart --strict ../../apps/mobile/build/device_bridge/native-telemetry-fixtures/*.ndjson

@@ -50,6 +50,13 @@ public class DeviceBridgePlugin: NSObject, FlutterPlugin, CLLocationManagerDeleg
   public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
     dispatchPrecondition(condition: .onQueue(.main))
     switch call.method {
+    case "motionCapabilities":
+      // Explicit unsupported result until native motion/time mapping is built.
+      result(["platform": "ios", "leanRecordingAvailable": false])
+    case "motionStatus":
+      result(["state": "unavailable"])
+    case "leanCalibration":
+      result(FlutterError(code: "calibration_unavailable", message: "Android experimental feature; iOS not implemented", details: nil))
     case "start":
       startRequestedInThisProcess = true
       if !defaults.bool(forKey: "roadscope.active") {

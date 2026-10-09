@@ -104,6 +104,18 @@ class LocationRecorderService : Service(), LocationListener {
         fun readTelemetry(context: Context, result: (String?, Exception?) -> Unit) =
             read(context, { telemetryFile(it) }, result)
 
+        fun motionStatus(context: Context): Map<String, Any?> {
+            val id = prefs(context).getString("latestId", null)
+            val file = id?.let { File(File(context.filesDir, "motion"), "$it.motion.ndjson") }
+            val latest = MotionSession.latest
+            val snapshot = motionSnapshotAt(latest, SystemClock.elapsedRealtimeNanos() / 1000)
+            return if (snapshot["recordingId"] == id) snapshot else mapOf(
+                "state" to "idle", "recordingId" to id,
+                "path" to file?.takeIf { it.exists() }?.absolutePath,
+                "leanPath" to id?.let { File(File(context.filesDir, "motion"), "$it.lean.ndjson") }
+                    ?.takeIf { it.exists() }?.absolutePath)
+        }
+
         private fun read(context: Context, pick: (Context) -> File?,
             result: (String?, Exception?) -> Unit) {
             val read = Runnable {
@@ -125,6 +137,7 @@ class LocationRecorderService : Service(), LocationListener {
     private lateinit var writer: LocationLogWriter
     private lateinit var handler: Handler
     private var telemetry: DeviceStateMonitor? = null
+    private var motion: MotionSession? = null
     @Volatile private var initialForeground: Boolean? = null
     @Volatile private var destroyed = false
     @Volatile private var active = false
@@ -145,6 +158,7 @@ class LocationRecorderService : Service(), LocationListener {
             handler.post {
                 if (destroyed) return@post
                 active = false
+                motion?.stop(); motion = null
                 // A segment this process never ran, but prefs still says
                 // recording, means the previous process died without closing
                 // its telemetry. Nothing else would ever mark that.
@@ -214,6 +228,16 @@ class LocationRecorderService : Service(), LocationListener {
                 .putInt("restartCount", restarts).remove("error").commit()
             persistClock()
             startTelemetry(id, version, resume, restarts)
+            try {
+                motion = MotionSession(this, id, version, writer.bootId, writer.bootAnchor).also { it.start() }
+            } catch (error: Exception) {
+                // Sensor setup is an independent diagnostic stream; GPS remains usable.
+                MotionSession.unavailable(id, error.message)
+            }
+            if (destroyed) {
+                motion?.stop(); motion = null
+                return // Destruction may have happened during file recovery/startup.
+            }
             // The first callback cannot overtake recording_started: both run here.
             active = true
             locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f,
@@ -360,6 +384,24 @@ class LocationRecorderService : Service(), LocationListener {
             writer.sample(sample, receivedUtc, receivedMono)
             lastMeasurementMonoUs = location.elapsedRealtimeNanos / 1000
             if (writer.bootId != previousBootId) persistClock()
+            if (writer.bootId != previousBootId) {
+                // The location writer is the single boot-domain authority.
+                // Stop old sensor stream; require explicit new recording before
+                // restarting it to avoid overlapping owners of the same file.
+                motion?.stop("Location boot domain changed; start a new recording to resume motion")
+                motion = null
+            } else {
+                // This hint is published only AFTER successful GPS append.
+                // No new location-log fields; bearing accuracy is a runtime
+                // quality gate, not a claim of replaying candidate selection.
+                val measurement = location.elapsedRealtimeNanos / 1000
+                val bearingAccuracy = if (Build.VERSION.SDK_INT >= 26 && location.hasBearingAccuracy())
+                    valid(location.bearingAccuracyDegrees) as? Double else null
+                motion?.rideFix(AutoUprightReference.Fix(writer.bootId, measurement,
+                    measurement >= 0 && measurement <= receivedMono,
+                    speed as? Double, horizontalAccuracy as? Double, speedAccuracy as? Double,
+                    heading as? Double, bearingAccuracy))
+            }
         } catch (error: Exception) { fail(error) }
     }
 
@@ -388,6 +430,10 @@ class LocationRecorderService : Service(), LocationListener {
         locationManager.removeUpdates(this)
         // quitSafely still drains queued work, so the closing row can be written.
         handler.post {
+            // Same owner as startup/GPS hints. Main-thread destruction must not
+            // race creation and lose the newly created session reference.
+            motion?.stop(); motion = null
+            locationManager.removeUpdates(this)
             telemetry?.stop("stopped", "recorder service destroyed")
             telemetry = null
         }
